@@ -1,0 +1,21 @@
+{
+  "name": "service-agent",
+  "version": "0.1.0",
+  "description": "企业智能客服 Agent",
+  "author": "",
+  "private": true,
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @service-agent/api --filter @service-agent/web dev",
+    "dev:web": "pnpm --filter @service-agent/web dev",
+    "dev:api": "pnpm --filter @service-agent/api dev",
+    "build": "pnpm --recursive --if-present build",
+    "lint": "pnpm --recursive --if-present lint",
+    "test": "pnpm --recursive --if-present test",
+    "format": "prettier --write \"apps/**/*.{ts,tsx,css}\" \"packages/**/*.ts\""
+  },
+  "devDependencies": {
+    "oxlint": "^1.58.0",
+    "prettier": "^3.4.2"
+  }
+}

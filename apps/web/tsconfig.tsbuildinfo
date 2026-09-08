@@ -1,0 +1,1 @@
+{"root":["./src/main.tsx","./src/api/conversations.ts","./src/api/llm.ts","./src/hooks/index.ts","./src/hooks/usellmstream.ts","./src/pages/workbenchpage.tsx","./src/stores/index.ts","./src/stores/workbench.ts","./src/types/conversation.ts"],"version":"5.9.3"}
