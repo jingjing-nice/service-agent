@@ -1,8 +1,18 @@
-export type { ConversationStatus } from '@service-agent/contracts';
-import type { ConversationStatus } from '@service-agent/contracts';
-export type Conversation = { id: string; name: string; channel: string; topic: string; preview: string; time: string; unread?: number; state: ConversationStatus };
-export type Message = { id: string; role: 'customer' | 'agent'; content: string; time: string; citations?: { title: string; source: string }[] };
+export type {
+    ConversationStatus
+} from '@service-agent/contracts';
+import type { ConversationStatus, CitationEvent } from '@service-agent/contracts';
 
+/**
+ * 页面真正需要保存的引用信息。
+ *
+ * 不保存 request_id、trace_id、message_id 等传输字段，
+ * 因为这些字段用于校验 SSE，不属于消息展示内容。
+ */
+export type MessageCitation = Pick<CitationEvent, 'index' | 'title' | 'source' | 'page'>
+
+export type Conversation = { id: string; name: string; channel: string; topic: string; preview: string; time: string; unread?: number; state: ConversationStatus };
+export type Message = { id: string; role: 'customer' | 'agent'; content: string; time: string; citations?: MessageCitation[] };
 
 
 /**
@@ -25,5 +35,5 @@ export type LocalMessage = {
     time: string;
 
     /** AI 回答引用的知识来源；普通用户消息通常没有该字段。 */
-    citations?: { title: string; source: string }[];
+    citations?: MessageCitation[];
 }

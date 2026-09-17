@@ -1,152 +1,251 @@
-import { Controller, MessageEvent, Query, Sse } from '@nestjs/common';
+import {
+  BadRequestException,
+  Controller,
+  Query,
+  Req,
+  Sse,
+  type MessageEvent,
+  NotFoundException,
+} from '@nestjs/common';
+import {
+  streamAnswerRequestSchema,
+  type AnswerDeltaEvent,
+  type MessageCompletedEvent,
+  type MessageFailedEvent,
+  type MessageStartedEvent,
+} from '@service-agent/contracts';
 import { randomUUID } from 'node:crypto';
-import { Observable } from 'rxjs';
-import { LlmService } from './llm.service.js';
+import { Observable, type Subscriber } from 'rxjs';
 import { MessagesService } from '../messages/messages.service.js';
+import { LlmService } from './llm.service.js';
+import { KnowledgeService } from '../knowledge/knowledge.service.js';
+import type { CitationEvent } from '@service-agent/contracts';
+import type { FastifyRequest } from 'fastify';
 
 /**
- * AI 流式输出控制器。
+ * 单次模型流允许占用的最长时间。
  *
- * 浏览器连接 `/api/llm/stream` 后，本控制器会调用大模型服务。
- * 模型每生成一小段文字，后端就通过 SSE 立即发送给浏览器。
+ * 导出常量是为了让测试使用虚拟时钟精确推进到同一个边界，
+ * 避免复制一个可能与生产配置逐渐失去同步的数字。
  */
+export const MODEL_TIMEOUT_MS = 45_000;
+const HISTORY_LIMIT = 10;
+
+type StreamEvent =
+  | MessageStartedEvent
+  | AnswerDeltaEvent
+  | MessageCompletedEvent
+  | CitationEvent
+  | MessageFailedEvent;
+
+type StreamEventMetadata = Pick<
+  MessageStartedEvent,
+  'event_id' | 'request_id' | 'trace_id' | 'message_id'
+>;
+
+/**
+ * 把业务事件转换成 NestJS 所需的 SSE 消息格式。
+ * 统一从 event_id 设置 SSE id，避免各分支出现协议字段不一致。
+ */
+function emitEvent(
+  subscriber: Subscriber<MessageEvent>,
+  event: StreamEvent,
+): void {
+  subscriber.next({ type: event.type, id: event.event_id, data: event });
+}
+
+/** 负责校验流式请求、维护 SSE 生命周期并持久化完整会话消息。 */
 @Controller('api/llm')
 export class LlmController {
-    // NestJS 会自动创建 LlmService，并通过构造函数传递进来。
-    constructor(private readonly llmService: LlmService,
-        //// 负责保存用户问题和最终的 AI 回答。
-        private readonly messagesService: MessagesService) { }
+  constructor(
+    private readonly llmService: LlmService,
+    private readonly messagesService: MessagesService,
+    private readonly knowledgeService: KnowledgeService,
+  ) {}
 
-    /**
-     * 建立 SSE 流式连接。
-     *
-     * 请求示例：GET /api/llm/stream?question=退款什么时候到账
-     * 如果没有传入 question，则默认向模型发送“你好”。
-     */
-    @Sse('stream')
-    stream(@Query('question') question = '你好', @Query('conversationId') conversationId = 'c1'): Observable<MessageEvent> {
-        // Observable 是一条可以多次发送数据的管道，适合 SSE 流式响应。
-        return new Observable<MessageEvent>((subscriber) => {
-            // requestId：标识本次用户请求。
-            const requestId = randomUUID();
+  /**
+   * 建立 AI 回答流。
+   *
+   * 事件顺序固定为 message.started -> answer.delta* ->
+   * message.completed/message.failed，所有事件共享同一组请求标识。
+   */
+  @Sse('stream')
+  stream(
+    @Query('question') rawQuestion: unknown,
+    @Query('conversationId') rawConversationId: unknown,
+    @Query('requestId') rawRequestId: unknown,
+    @Req() request: FastifyRequest,
+  ): Observable<MessageEvent> {
+    const tenantId = process.env.DEFAULT_TENANT_ID ?? 'tenant-local-dev';
+    const knowledgeBaseId = process.env.DEFAULT_KNOWLEDGE_BASE_ID?.trim();
 
-            // traceId：串联前端、API 和模型调用，方便以后查询日志。
-            const traceId = randomUUID();
+    const localAddresses = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
-            // messageId：标识本次正在生成的 AI 消息。
-            const messageId = randomUUID();
-
-            // eventNumber：记录事件顺序，后续可用于断线重连和事件去重。
-            let eventNumber = 0;
-
-            // cancelled：记录浏览器是否已经关闭了 SSE 连接。
-            let cancelled = false;
-
-            // abortController：用于取消模型调用。
-            let abortController = new AbortController();
-
-            // 用来累积本轮 AI 返回的所有文字片段。
-            let fullAnswer = ''
-
-            /**
- * 必须在保存当前问题之前读取历史记录，
- * 否则当前问题会在模型上下文中重复出现两次。
- *  只传最近 10 条，避免历史无限增长。
- */
-
-            const history = this.messagesService
-                .findByConversationId(conversationId).slice(-10).map((message) => ({
-                    role:
-                        message.role === 'customer'
-                            ? ('user' as const)
-                            : ('assistant' as const),
-                    content: message.content,
-                }));
-
-            // 先保存用户信息
-            this.messagesService.create({
-                conversationId,
-                role: 'customer',
-                content: question
-            })
-
-            // 在 Observable 内启动异步模型调用，不阻塞 Observable 的创建过程。
-            void (async () => {
-                try {
-                    // streamAnswer 是异步生成器，每次循环只得到一小段模型文字。
-                    for await (const text of this.llmService.streamAnswer(question, history, abortController.signal)) {
-                        // 浏览器已经断开时，不再继续发送数据。
-                        if (cancelled) {
-                            return;
-                        }
-
-                        // 后端保存完整回答需要把所有 delta 拼接起来。
-                        fullAnswer += text
-                        eventNumber += 1;
-
-                        // answer.delta 表示“AI 新生成了一小段文字”。
-                        // subscriber.next() 只发送本次事件，不会结束 SSE 连接。
-                        subscriber.next({
-                            type: 'answer.delta',
-                            id: String(eventNumber),
-                            data: {
-                                type: 'answer.delta',
-                                event_id: String(eventNumber),
-                                request_id: requestId,
-                                trace_id: traceId,
-                                message_id: messageId,
-                                text,
-                            },
-                        });
-                    }
-
-                    if (cancelled) {
-                        return;
-                    }
-
-                    // 将完整 AI 回答保存到后端。
-                    if (fullAnswer.trim()) {
-                        this.messagesService.create({
-                            conversationId,
-                            role: 'agent',
-                            content: fullAnswer,
-                        });
-                    }
-
-
-
-                    eventNumber += 1;
-
-                    // 模型没有更多文字时，通知前端当前消息已经生成完毕。
-                    subscriber.next({
-                        type: 'message.completed',
-                        id: String(eventNumber),
-                        data: {
-                            type: 'message.completed',
-                            event_id: String(eventNumber),
-                            request_id: requestId,
-                            trace_id: traceId,
-                            message_id: messageId,
-                        },
-                    });
-
-                    // 正常结束 Observable，NestJS 随后会关闭本次 SSE 响应。
-                    subscriber.complete();
-                } catch (error) {
-                    if (cancelled || abortController?.signal.aborted) {
-                        return;
-                    }
-                    // 模型调用失败时，把错误交给 Observable 处理并结束连接。
-                    subscriber.error(error);
-                }
-            })();
-
-            // 浏览器关闭页面或主动断开连接时，RxJS 会调用这个清理函数。
-            return () => {
-                cancelled = true;
-                // 取消模型调用，避免浪费算力。
-                abortController.abort();
-            };
-        });
+    // 草稿检索仅供本机开发验证，未接入正式鉴权前不能对外开放。
+    if (
+      process.env.NODE_ENV === 'production' ||
+      !localAddresses.has(request.ip)
+    ) {
+      throw new NotFoundException();
     }
+
+    const parseResult = streamAnswerRequestSchema.safeParse({
+      conversationId: rawConversationId,
+      question: rawQuestion,
+      requestId: rawRequestId,
+    });
+
+    if (!parseResult.success) {
+      throw new BadRequestException({
+        code: 'INVALID_STREAM_REQUEST',
+        message: '流式请求参数不正确',
+        details: parseResult.error.flatten().fieldErrors,
+      });
+    }
+
+    const { conversationId, question, requestId } = parseResult.data;
+
+    return new Observable<MessageEvent>((subscriber) => {
+      const traceId = randomUUID();
+      const messageId = randomUUID();
+      const abortController = new AbortController();
+      let eventNumber = 0;
+      let cancelled = false;
+      let fullAnswer = '';
+
+      /** 为每个事件生成递增编号，同时复用本次流的关联标识。 */
+      const createEventMetadata = (): StreamEventMetadata => ({
+        event_id: String(++eventNumber),
+        request_id: requestId,
+        trace_id: traceId,
+        message_id: messageId,
+      });
+
+      // 必须先读取历史再保存当前问题，否则问题会在模型上下文中出现两次。
+      const history = this.messagesService
+        .findByConversationId(conversationId)
+        .slice(-HISTORY_LIMIT)
+        .map((message) => ({
+          role:
+            message.role === 'customer'
+              ? ('user' as const)
+              : ('assistant' as const),
+          content: message.content,
+        }));
+
+      this.messagesService.create({
+        conversationId,
+        role: 'customer',
+        content: question,
+      });
+
+      /** 以公开、安全的错误信息结束流；底层异常不会泄漏到客户端。 */
+      const failStream = (
+        code: MessageFailedEvent['code'],
+        message: string,
+      ): void => {
+        if (cancelled || subscriber.closed) return;
+
+        emitEvent(subscriber, {
+          type: 'message.failed',
+          ...createEventMetadata(),
+          code,
+          message,
+        });
+        subscriber.complete();
+      };
+
+      // 总时限不会随新片段重置，保证慢速或卡住的模型调用也能被终止。
+      const timeoutId = setTimeout(() => {
+        failStream('MODEL_TIMEOUT', '回答生成超时，请稍后重试');
+      }, MODEL_TIMEOUT_MS);
+
+      // Observable 构造函数不能直接使用 async，因此在订阅后单独启动生成任务。
+      void (async () => {
+        try {
+          emitEvent(subscriber, {
+            type: 'message.started',
+            ...createEventMetadata(),
+          });
+
+          if (!knowledgeBaseId) {
+            throw new Error('DEFAULT_KNOWLEDGE_BASE_ID is required');
+          }
+
+          const sources = await this.knowledgeService.retrieveDraftKnowledge(
+            tenantId,
+            knowledgeBaseId,
+            question,
+          );
+
+          for await (const text of this.llmService.streamAnswer(
+            question,
+            history,
+            sources,
+            abortController.signal,
+          )) {
+            if (cancelled) return;
+
+            fullAnswer += text;
+            emitEvent(subscriber, {
+              type: 'answer.delta',
+              ...createEventMetadata(),
+              text,
+            });
+          }
+
+          if (cancelled) return;
+
+          // 空答案不能伪装成成功，否则前端会完成但消息列表中没有 AI 回复。
+          if (!fullAnswer.trim()) {
+            throw new Error('MODEL_EMPTY_ANSWER');
+          }
+
+          const citedIndexes = new Set(
+            [...fullAnswer.matchAll(/\[(\d+)\]/g)]
+              .map((match) => Number(match[1]))
+              .filter((index) => index >= 1 && index <= sources.length),
+          );
+
+          const citations = [...citedIndexes].map((index) => {
+            const source = sources[index - 1];
+            return { index, title: source.title, source: source.documentId };
+          });
+
+          // 与回答一起保存引用，避免前端重新获取消息后来源卡片消失。
+          this.messagesService.create({
+            conversationId,
+            role: 'agent',
+            content: fullAnswer,
+            citations,
+          });
+
+          for (const citation of citations) {
+            emitEvent(subscriber, {
+              type: 'citation',
+              ...createEventMetadata(),
+              ...citation,
+            });
+          }
+
+          emitEvent(subscriber, {
+            type: 'message.completed',
+            ...createEventMetadata(),
+          });
+          subscriber.complete();
+        } catch {
+          // complete/unsubscribe 会触发 teardown；取消造成的异常不应再生成失败事件。
+          if (cancelled || abortController.signal.aborted) return;
+
+          failStream('MODEL_STREAM_FAILED', 'AI 服务暂时不可用，请稍后重试');
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+        clearTimeout(timeoutId);
+        abortController.abort();
+      };
+    });
+  }
 }

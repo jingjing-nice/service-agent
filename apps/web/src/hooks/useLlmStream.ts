@@ -34,10 +34,14 @@ export function useLlmStream() {
         (state) => state.startStreaming,
     );
 
+    const startSending = useWorkbenchStore(state => state.startSending)
+
     const appendStreamingText =
         useWorkbenchStore(
             (state) => state.appendStreamingText,
         );
+
+    const appendStreamingCitation = useWorkbenchStore(state => state.appendStreamingCitation);
 
     const saveAssistantMessage = useWorkbenchStore(
         (state) => state.saveAssistantMessage,
@@ -52,19 +56,49 @@ export function useLlmStream() {
     );
 
     const clearLocalMessages = useWorkbenchStore(state => state.clearLocalMessages)
+
     /**
      * 开始一次新的 AI 流式请求。
      */
     function startNewStream(conversationId: string, question: string) {
         // 清空上一次的流式数据和错误。
         closeStreamRef.current?.();
-        // 空上一次回答，并将状态设置为 streaming。
-        startStreaming();
+        // // 空上一次回答，并将状态设置为 streaming。
+        // startStreaming();
+        /**
+         * 用户已经发起请求，
+         * 但后端还没有发送 message.started。
+         */
+        startSending()
         // 创建新的 SSE 连接。
         closeStreamRef.current = streamAnswer(conversationId, question, {
+            /**
+ * 后端发送 message.started 后，
+ * 表示请求已经被接受并开始处理。
+ */
+
+            onStart: () => {
+                startStreaming()
+            },
             //  // 每收到一小段文字，就追加到 Zustand。
             onText: (text) => {
                 appendStreamingText(text);
+            },
+            onCitation: ({ index,
+                title,
+                source,
+                page }) => {
+                /**
+ * SSE 身份字段已经由 API 层完成校验，
+ * Store 只保存页面展示所需的信息。
+ */
+                appendStreamingCitation({
+                    index,
+                    title,
+                    source,
+                    page
+                })
+
             },
             // 收到完成事件后，将 streamingText 保存为一条正式的 AI 消息。
             onCompleted: () => {
@@ -88,6 +122,11 @@ export function useLlmStream() {
                 failStreaming(error.message);
                 closeStreamRef.current = null;
             },
+            onFailed: (event) => {
+                failStreaming(event.message);
+                // message.failed 是终止事件，连接已经不会再产生新消息。
+                closeStreamRef.current = null;
+            }
         });
     }
 

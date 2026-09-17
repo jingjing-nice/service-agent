@@ -1,4 +1,4 @@
-import type { Conversation, Message } from '../types/conversation';
+import type { Conversation, Message, MessageCitation } from '../types/conversation';
 
 const conversations: Conversation[] = [
   { id: 'c1', name: '陈悦', channel: '微信', topic: '退款咨询', preview: 'AI 正在查询退款进度，请稍候…', time: '10:42', unread: 2, state: 'streaming' },
@@ -21,6 +21,7 @@ type BackendMessage = {
   role: 'customer' | 'agent';
   content: string;
   createdAt: string;
+  citations?: MessageCitation[];
 };
 
 
@@ -43,6 +44,7 @@ async function getMessages(conversationId: string): Promise<Message[]> {
     id: item.id,
     role: item.role,
     content: item.content,
+    citations: item.citations,
 
     // 后端保存的是 ISO 时间，这里转换为页面显示的小时和分钟。
     time: new Date(item.createdAt).toLocaleTimeString('zh-CN', {

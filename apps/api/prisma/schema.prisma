@@ -1,0 +1,149 @@
+/**
+ * Prisma 7 Client 生成配置。
+ *
+ * 生成代码放在 src/generated/prisma，
+ * 方便 NestJS 使用 ESM 相对路径导入。
+ */
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+/**
+ * 数据库连接地址由 prisma.config.ts 提供。
+ */
+datasource db {
+  provider = "postgresql"
+}
+
+/**
+ * 知识文档处理状态。
+ *
+ * UPLOADED：原文件已经保存，尚未开始处理。
+ * PARSING：正在解析和切片。
+ * CHUNKED：切片已保存，尚未生成向量，不能参与检索。
+ * READY：文档已经可以参与检索。
+ * FAILED：处理失败，不能参与检索。
+ */
+enum KnowledgeDocumentStatus {
+  UPLOADED
+  PARSING
+  CHUNKED
+  READY
+  FAILED
+}
+
+/**
+ * 知识库中的一份原始文档。
+ *
+ * 这里只保存文档元数据。
+ * Markdown 原文件保存在 MinIO，
+ * 后续文本切片和向量分别保存。
+ */
+model KnowledgeDocument {
+  /// 文档唯一编号，使用 PostgreSQL UUID 类型。
+  id String @id @default(uuid()) @db.Uuid
+
+  /// 文档所属租户，用于企业数据隔离。
+  tenantId String @map("tenant_id") @db.VarChar(100)
+
+  /// 用户上传时的原始文件名。
+  fileName String @map("file_name") @db.VarChar(255)
+
+  /// 文件在 MinIO bucket 中的对象路径。
+  objectKey String @unique @map("object_key") @db.VarChar(500)
+
+  /// 文件 MIME 类型，首批只允许 text/markdown。
+  mimeType String @map("mime_type") @db.VarChar(100)
+
+  /// 文件大小，单位为字节。
+  sizeBytes Int @map("size_bytes")
+
+  /// 文件内容的 SHA-256，用于识别重复上传。
+  sha256 String @db.Char(64)
+
+  /// 当前文档处理状态。
+  status KnowledgeDocumentStatus @default(UPLOADED)
+
+  /// 对外稳定的错误码，不保存内部异常堆栈。
+  errorCode String? @map("error_code") @db.VarChar(100)
+
+  /// 文档创建时间。
+  createdAt DateTime @default(now()) @map("created_at")
+  // 旧文档暂时可为空，后续回填后再考虑设为必填。
+  knowledgeBaseId String? @map("knowledge_base_id") @db.Uuid
+
+  knowledgeBase KnowledgeBase? @relation(fields: [knowledgeBaseId, tenantId], references: [id, tenantId], onDelete: Restrict)
+
+  /// 文档最后更新时间。
+  updatedAt DateTime @updatedAt @map("updated_at")
+  /// 该文档解析得到的切片。
+  chunks KnowledgeChunk[]
+
+  /**
+   * 同一租户不能重复保存内容完全相同的文件。
+   * 不同租户可以分别上传相同文件。
+   */
+  @@unique([tenantId, sha256])
+
+  /// 支持按租户和处理状态查询文档。
+  @@index([tenantId, status])
+
+  @@index([tenantId, knowledgeBaseId])
+
+  /// PostgreSQL中的实际表名。
+  @@map("knowledge_documents")
+}
+
+/// 从知识文档解析得到的一段文本；原文件仍保存在 MinIO。
+model KnowledgeChunk {
+  /// 切片自身的唯一 ID。
+  id String @id @default(uuid()) @db.Uuid
+
+  /// 所属文档 ID；通过下方 relation 关联 KnowledgeDocument。
+  documentId String @map("document_id") @db.Uuid
+
+  /// 所属租户。后续查询切片时必须按租户过滤。
+  tenantId String @map("tenant_id") @db.VarChar(100)
+
+  /// 在原文档中的顺序，从 0 开始。
+  chunkIndex Int @map("chunk_index")
+
+  /// 切片正文，用于后续生成向量和展示预览。
+  content String @db.Text
+
+  /// 正文字符数，便于检查切片大小。
+  characterCount Int @map("character_count")
+
+  /// 标题路径，例如 ["退款政策", "申请条件"]。
+  headingPath Json @map("heading_path")
+
+  /// 删除文档时一并删除其切片，避免留下孤立数据。
+  document KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  /// 同一文档不能有两个相同编号的切片。
+  @@unique([documentId, chunkIndex])
+
+  /// 支持按租户和文档查询切片。
+  @@index([tenantId, documentId])
+
+  /// PostgreSQL 中的实际表名。
+  @@map("knowledge_chunks")
+}
+
+
+/// 一个租户下的知识库；向量检索需按租户和知识库共同过滤。
+model KnowledgeBase {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.VarChar(100)
+  name      String   @db.VarChar(100)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  documents KnowledgeDocument[]
+  /// 同一租户内知识库名称不重复。
+  @@unique([tenantId, name])
+  /// 供后续文档建立同时包含租户 ID 的关联。
+  @@unique([id, tenantId])
+  @@map("knowledge_bases")
+}

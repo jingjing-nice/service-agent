@@ -4,6 +4,8 @@ import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { LlmModule } from './modules/llm/llm.module.js';
 import { MessagesModule } from './modules/messages/messages.module.js';
+import { DatabaseModule } from './database/database.module.js';
+import { KnowledgeModule } from './modules/knowledge/knowledge.module.js';
 
 /**
  * 应用根模块。
@@ -18,6 +20,12 @@ import { MessagesModule } from './modules/messages/messages.module.js';
       // 设置为全局模块后，其他模块不需要再次导入 ConfigModule。
       isGlobal: true,
     }),
+    // 创建全局 Prisma 数据库连接。
+    DatabaseModule,
+    /**
+     * 注册知识文档状态查询接口。
+     */
+    KnowledgeModule,
 
     // 注册大模型模块，使应用可以访问 AI 流式输出接口。
     LlmModule,
@@ -31,4 +39,4 @@ import { MessagesModule } from './modules/messages/messages.module.js';
   // 注册 AppController 依赖的基础服务。
   providers: [AppService],
 })
-export class AppModule { }
+export class AppModule {}

@@ -1,0 +1,113 @@
+name: service-agent
+
+services:
+  # 保存知识文档元数据、处理状态、版本和审计记录。
+  postgres:
+    image: postgres:16-alpine
+    container_name: service-agent-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-service_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-service_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-service_agent_dev}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      # 使用两个 $，避免 Compose 提前替换容器内的环境变量。
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # 后续供 BullMQ 保存文档解析任务和短期任务状态。
+  redis:
+    image: redis:7-alpine
+    container_name: service-agent-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  etcd:
+    container_name: service-agent-etcd
+    image: quay.io/coreos/etcd:v3.5.25
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/etcd:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio:
+    container_name: service-agent-minio
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-service_agent}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-service_agent_dev_password}
+    ports:
+      - "9001:9001"
+      - "9000:9000"
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus:
+    container_name: service-agent-milvus
+    image: milvusdb/milvus:v3.0.0
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+    - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-service_agent}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-service_agent_dev_password}
+      MINIO_BUCKET_NAME: ${MILVUS_BUCKET:-milvus-data}
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      - "etcd"
+      - "minio"
+
+networks:
+  default:
+    name: milvus
+
+# 使用 Docker 具名卷，普通停止或重启不会删除已有数据。
+volumes:
+  postgres_data:
+  redis_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
