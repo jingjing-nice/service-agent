@@ -16,7 +16,7 @@ body {
 .workbench {
     height: 100dvh;
     display: grid;
-    grid-template-columns: 64px 320px minmax(520px, 1fr) 300px;
+    grid-template-columns: 64px 320px minmax(520px, 1fr);
     background: #f7f8f7;
     overflow: hidden
 }
@@ -76,8 +76,7 @@ body {
 .person,
 .person h2,
 .queue-meta,
-.tool-card>div,
-.sentiment {
+.tool-card>div {
     display: flex;
     align-items: center
 }
@@ -454,118 +453,6 @@ body {
     background: #e0a330
 }
 
-.detail {
-    background: white;
-    border-left: 1px solid #e4e8e6;
-    overflow: auto
-}
-
-.detail-hidden {
-    grid-template-columns: 64px 320px minmax(520px, 1fr) 0
-}
-
-.detail-hidden .detail {
-    display: none
-}
-
-.detail-tabs {
-    height: 60px;
-    border-bottom: 1px solid #e9eceb;
-    padding: 0 18px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between
-}
-
-.profile {
-    text-align: center;
-    padding: 22px
-}
-
-.profile h3 {
-    margin: 9px 0 3px
-}
-
-.profile p {
-    margin: 0 0 14px;
-    font-size: 11px;
-    color: #7e8b88
-}
-
-.info {
-    border-top: 1px solid #edf0ef;
-    padding: 18px
-}
-
-.info h4 {
-    margin: 0 0 14px;
-    font-size: 12px
-}
-
-.info dl {
-    margin: 0
-}
-
-.info dl div {
-    display: flex;
-    justify-content: space-between;
-    font-size: 11px;
-    margin: 11px 0
-}
-
-.info dt {
-    color: #84908d
-}
-
-.info dd {
-    margin: 0
-}
-
-.order {
-    background: #f7f8f7;
-    border: 1px solid #e6e9e8;
-    padding: 11px;
-    border-radius: 9px;
-    font-size: 10px
-}
-
-.order strong {
-    display: block;
-    font-size: 17px;
-    margin-top: 10px
-}
-
-.order p,
-.summary {
-    color: #768480;
-    font-size: 11px;
-    line-height: 1.7
-}
-
-.sentiment {
-    gap: 7px;
-    font-size: 10px
-}
-
-.sentiment span {
-    height: 5px;
-    background: #e6ebe9;
-    flex: 1;
-    border-radius: 3px
-}
-
-.sentiment span i {
-    display: block;
-    width: 72%;
-    height: 100%;
-    background: #41a57e;
-    border-radius: 3px
-}
-
-.sentiment em {
-    font-style: normal
-}
-
 .source {
     font-size: 12px;
     color: #87918f
@@ -920,26 +807,11 @@ blockquote {
     .workbench {
         grid-template-columns: 64px 300px 1fr
     }
-
-    .detail {
-        position: fixed;
-        right: 0;
-        top: 0;
-        bottom: 0;
-        width: 300px;
-        z-index: 5;
-        box-shadow: -10px 0 30px #183c3720
-    }
-
-    .detail-hidden {
-        grid-template-columns: 64px 300px 1fr
-    }
 }
 
 @media(max-width:760px) {
 
-    .workbench,
-    .detail-hidden {
+    .workbench {
         grid-template-columns: 1fr
     }
 

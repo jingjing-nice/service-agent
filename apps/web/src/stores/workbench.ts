@@ -17,9 +17,6 @@ type WorkbenchState = {
   /** 当前会话的处理状态，例如 idle、streaming、completed 或 failed。 */
   status: ConversationStatus;
 
-  /** 是否显示工作台右侧的客户详情面板。 */
-  detailOpen: boolean;
-
   /**
    * 当前 AI 回复已经生成的文字。
    * SSE 每返回一个文字片段，都会将它追加到这个字符串后面。
@@ -45,9 +42,6 @@ type WorkbenchState = {
 
   /** 只修改当前会话状态，不切换会话。 */
   setStatus: (status: ConversationStatus) => void;
-
-  /** 在显示和隐藏之间切换右侧客户详情面板。 */
-  toggleDetail: () => void;
 
   /** 开始新的 AI 回复，并清空上一次生成的文字和错误。 */
   startStreaming: () => void;
@@ -119,14 +113,14 @@ function createMessageTime() {
  * 状态变化后，使用了对应状态的组件会自动重新渲染。
  */
 export const useWorkbenchStore = create<WorkbenchState>((set) => ({
-  // 页面首次打开时，默认选中 c1 会话。
-  activeId: 'c1',
+  /**
+   * 页面首次打开时还没有加载真实会话，因此不预设模拟 ID。
+   * WorkbenchPage 会在会话列表加载成功后选中第一条真实会话。
+   */
+  activeId: '',
 
   // 初始状态为空闲，表示 AI 尚未开始生成回复。
   status: 'idle',
-
-  // 页面首次打开时显示右侧客户详情。
-  detailOpen: true,
 
   // 尚未收到 AI 返回内容，所以初始值为空字符串。
   streamingText: '',
@@ -144,6 +138,14 @@ export const useWorkbenchStore = create<WorkbenchState>((set) => ({
     set({
       activeId,
       status,
+      /**
+       * localMessages 只属于切换前的会话。
+       * 切换会话时必须清空，避免临时消息显示到其他客户会话中。
+       */
+      localMessages: [],
+      streamingText: '',
+      streamingCitations: [],
+      streamError: null,
     }),
 
   // set() 会将传入字段合并到当前 Store，不会删除其他状态。
@@ -152,12 +154,6 @@ export const useWorkbenchStore = create<WorkbenchState>((set) => ({
       status,
     }),
 
-  // 这里需要读取修改前的值，因此向 set() 传入回调函数。
-  toggleDetail: () =>
-    set((state) => ({
-      // ! 表示取反：true 变 false，false 变 true。
-      detailOpen: !state.detailOpen,
-    })),
   /**
  * 用户点击发送后，先进入 sending 状态。
  *

@@ -227,9 +227,21 @@ export const citationEventSchema = baseSseEventSchema.extend({
   title: z.string().trim().min(1),
 
   /**
-   * 来源文件名、网页地址或知识库中的来源标识。
+   * 来源文档 ID。
+   *
+   * 当前 RAG 流程返回 KnowledgeDocument 的 UUID，
+   * 前端使用该字段确定引用属于哪一份文档。
+   * 字段名称保留 source，以兼容现有消息结构。
    */
-  source: z.string().trim().min(1),
+  source: z.string().uuid(),
+
+  /**
+   * 回答实际使用的知识切片 ID。
+   *
+   * 新回答会提供该字段，前端据此读取精确切片；
+   * optional 用于兼容数据库中没有 chunkId 的历史引用。
+   */
+  chunkId: z.string().uuid().optional(),
 
   /**
    * 来源页码。

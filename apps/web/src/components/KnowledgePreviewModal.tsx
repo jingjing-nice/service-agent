@@ -19,22 +19,49 @@ type ChunkPreview = {
   }>;
 };
 
+/** 文档上传、切片和索引的技术处理状态。 */
+type KnowledgeDocumentStatus =
+  | 'UPLOADED'
+  | 'PARSING'
+  | 'CHUNKED'
+  | 'INDEXING'
+  | 'READY'
+  | 'FAILED';
+
+/** 文档是否允许参与正式 RAG 检索的业务状态。 */
+type KnowledgePublishStatus = 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
+
 type UploadedDocument = {
   id: string;
   fileName: string;
   sizeBytes: number;
-  status: string;
+  /** READY 只表示索引就绪，不等于已经发布。 */
+  status: KnowledgeDocumentStatus;
+  /** 只有 PUBLISHED 文档能够参与正式问答。 */
+  publishStatus: KnowledgePublishStatus;
+  indexVersion: string | null;
+  publishedAt?: string;
   errorCode: string | null;
   canRetryIndex: boolean;
+  /** 由后端统一判断，前端不重复拼装发布规则。 */
+  canPublish: boolean;
   createdAt: string;
 };
 
-const documentStatusLabel: Record<string, string> = {
+const documentStatusLabel: Record<KnowledgeDocumentStatus, string> = {
   UPLOADED: '已上传',
   PARSING: '处理中',
-  READY: '已就绪',
+  READY: '索引已就绪',
   FAILED: '处理失败',
-  CHUNKED: '已切片'
+  CHUNKED: '已切片',
+  INDEXING: '索引中',
+};
+
+/** 发布状态独立展示，避免把“索引就绪”误解成“可用于问答”。 */
+const publishStatusLabel: Record<KnowledgePublishStatus, string> = {
+  DRAFT: '草稿',
+  PUBLISHED: '已发布',
+  ARCHIVED: '已归档',
 };
 
 type KnowledgePreviewModalProps = {
@@ -59,12 +86,19 @@ export function KnowledgePreviewModal({
     null,
   );
   const [selectedDocumentStatus, setSelectedDocumentStatus] = useState<
-    string | null
+    KnowledgeDocumentStatus | null
+  >(null);
+  const [selectedPublishStatus, setSelectedPublishStatus] = useState<
+    KnowledgePublishStatus | null
   >(null);
   const [canRetrySelectedIndex, setCanRetrySelectedIndex] = useState(false);
+  const [canPublishSelectedDocument, setCanPublishSelectedDocument] =
+    useState(false);
   const [selectedErrorCode, setSelectedErrorCode] = useState<string | null>(null);
   const [indexing, setIndexing] = useState(false);
   const [indexError, setIndexError] = useState('');
+  const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState('');
   const [indexResult, setIndexResult] = useState<{
     documentId: string;
     chunkCount: number;
@@ -111,16 +145,21 @@ export function KnowledgePreviewModal({
   function openChunkDrawer(
     id: string,
     fileName: string,
-    status: string,
+    status: KnowledgeDocumentStatus,
+    publishStatus: KnowledgePublishStatus,
     canRetryIndex: boolean,
+    canPublish: boolean,
     errorCode: string | null,
   ) {
     // 先打开抽屉，切片请求期间在抽屉内显示加载状态。
     setSelectedDocumentId(id);
     setSelectedDocumentStatus(status);
+    setSelectedPublishStatus(publishStatus);
     setCanRetrySelectedIndex(canRetryIndex);
+    setCanPublishSelectedDocument(canPublish);
     setSelectedErrorCode(errorCode);
     setIndexError('');
+    setPublishError('');
     setIndexResult(null);
     setDrawerTitle(fileName);
     setDrawerOpen(true);
@@ -165,7 +204,10 @@ export function KnowledgePreviewModal({
         indexedCount: result.indexedCount,
       });
       setSelectedDocumentStatus('READY');
+      // 新建立的是草稿索引，需要用户显式发布后才能用于正式问答。
+      setSelectedPublishStatus('DRAFT');
       setCanRetrySelectedIndex(false);
+      setCanPublishSelectedDocument(true);
       setSelectedErrorCode(null);
       setUploadError('');
       void refreshDocuments();
@@ -173,6 +215,57 @@ export function KnowledgePreviewModal({
       setIndexError(error instanceof Error ? error.message : '建立索引失败');
     } finally {
       setIndexing(false);
+    }
+  }
+
+  /**
+   * 发布当前文档的草稿索引。
+   *
+   * 租户、知识库和索引版本都由后端根据文档记录确定，
+   * 浏览器只提交文档 ID，不能伪造发布范围。
+   */
+  async function publishSelectedDocument() {
+    const documentId = selectedDocumentId;
+    if (!documentId || publishing || !canPublishSelectedDocument) return;
+
+    setPublishing(true);
+    setPublishError('');
+
+    try {
+      const response = await fetch(
+        `/api/knowledge/documents/${encodeURIComponent(documentId)}/publish`,
+        { method: 'POST' },
+      );
+
+      if (!response.ok) {
+        throw new Error(`发布文档失败：HTTP ${response.status}`);
+      }
+
+      const result = (await response.json()) as {
+        documentId?: unknown;
+        publishStatus?: unknown;
+        publishedAt?: unknown;
+      };
+
+      // 验证关键响应字段，避免接口异常时前端错误显示为发布成功。
+      if (
+        result.documentId !== documentId ||
+        result.publishStatus !== 'PUBLISHED' ||
+        typeof result.publishedAt !== 'string'
+      ) {
+        throw new Error('发布响应缺少有效的文档状态');
+      }
+
+      setSelectedPublishStatus('PUBLISHED');
+      setCanPublishSelectedDocument(false);
+      setSelectedErrorCode(null);
+
+      // 刷新文档列表，使列表中的发布状态与抽屉保持一致。
+      await refreshDocuments();
+    } catch (error) {
+      setPublishError(error instanceof Error ? error.message : '发布文档失败');
+    } finally {
+      setPublishing(false);
     }
   }
 
@@ -232,8 +325,10 @@ export function KnowledgePreviewModal({
       openChunkDrawer(
         uploaded.id,
         selectedFile.name,
-        uploaded.status,
+        uploaded.status as KnowledgeDocumentStatus,
+        'DRAFT',
         uploaded.status === 'CHUNKED',
+        uploaded.status === 'READY',
         typeof uploaded.errorCode === 'string' ? uploaded.errorCode : null,
       );
     } catch (error) {
@@ -249,7 +344,7 @@ export function KnowledgePreviewModal({
         title="知识文档"
         open={open}
         onCancel={() => {
-          if (indexing) return;
+          if (indexing || publishing) return;
           setDrawerOpen(false);
           onClose();
         }}
@@ -266,7 +361,7 @@ export function KnowledgePreviewModal({
             <span className="knowledge-preview-step">1</span>
             <div>
               <h3>上传新文档</h3>
-              <p>上传后自动切片并建立索引；成功后文档可参与知识库问答。</p>
+              <p>上传后自动切片并建立草稿索引；确认发布后才会参与知识库问答。</p>
             </div>
           </div>
           <div className="knowledge-preview-actions">
@@ -340,7 +435,9 @@ export function KnowledgePreviewModal({
                       item.id,
                       item.fileName,
                       item.status,
+                      item.publishStatus,
                       item.canRetryIndex,
+                      item.canPublish,
                       item.errorCode,
                     )
                   }
@@ -359,7 +456,9 @@ export function KnowledgePreviewModal({
                   <span
                     className={`knowledge-document-status status-${item.status.toLowerCase()}`}
                   >
-                    {documentStatusLabel[item.status] ?? item.status}
+                    {documentStatusLabel[item.status]}
+                    {' · '}
+                    {publishStatusLabel[item.publishStatus]}
                   </span>
                   <ArrowRightOutlined className="knowledge-document-arrow" />
                 </button>
@@ -381,10 +480,10 @@ export function KnowledgePreviewModal({
         title={drawerTitle || '切片预览'}
         open={open && drawerOpen}
         onClose={() => {
-          if (!indexing) setDrawerOpen(false);
+          if (!indexing && !publishing) setDrawerOpen(false);
         }}
-        closable={!indexing}
-        maskClosable={!indexing}
+        closable={!indexing && !publishing}
+        maskClosable={!indexing && !publishing}
         extra={canRetrySelectedIndex ? (
           <Popconfirm
             title="重试建立向量索引？"
@@ -404,6 +503,27 @@ export function KnowledgePreviewModal({
               }
             >
               重试建立索引
+            </Button>
+          </Popconfirm>
+        ) : canPublishSelectedDocument ? (
+          <Popconfirm
+            title="发布当前知识文档？"
+            description="发布后，该文档将立即参与正式知识库问答。"
+            okText="确认发布"
+            cancelText="取消"
+            zIndex={1200}
+            onConfirm={() => void publishSelectedDocument()}
+          >
+            <Button
+              type="primary"
+              loading={publishing}
+              disabled={
+                !selectedDocumentId ||
+                selectedDocumentStatus !== 'READY' ||
+                selectedPublishStatus !== 'DRAFT'
+              }
+            >
+              发布文档
             </Button>
           </Popconfirm>
         ) : null}
@@ -428,9 +548,21 @@ export function KnowledgePreviewModal({
         {selectedDocumentStatus === 'READY' && (
           <Alert
             className="knowledge-index-feedback"
-            type="success"
+            type={selectedPublishStatus === 'PUBLISHED' ? 'success' : 'warning'}
             showIcon
-            message="索引已就绪，当前文档可参与知识库问答。"
+            message={
+              selectedPublishStatus === 'PUBLISHED'
+                ? '文档已发布，当前内容可以参与知识库问答。'
+                : '草稿索引已就绪；发布文档后才能参与知识库问答。'
+            }
+          />
+        )}
+        {publishError && (
+          <Alert
+            className="knowledge-index-feedback"
+            type="error"
+            showIcon
+            message={publishError}
           />
         )}
         {indexError && (

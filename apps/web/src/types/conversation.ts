@@ -9,7 +9,19 @@ import type { ConversationStatus, CitationEvent } from '@service-agent/contracts
  * 不保存 request_id、trace_id、message_id 等传输字段，
  * 因为这些字段用于校验 SSE，不属于消息展示内容。
  */
-export type MessageCitation = Pick<CitationEvent, 'index' | 'title' | 'source' | 'page'>
+/**
+ * 页面展示引用时需要的数据。
+ *
+ * chunkId 暂时声明为可选：
+ * - 新回答接入精确引用协议后会携带该字段；
+ * - 已经保存的历史回答只有 documentId，需要继续兼容。
+ */
+export type MessageCitation = Pick<
+    CitationEvent,
+    'index' | 'title' | 'source' | 'page'
+> & {
+    chunkId?: string;
+}
 
 export type Conversation = { id: string; name: string; channel: string; topic: string; preview: string; time: string; unread?: number; state: ConversationStatus };
 export type Message = { id: string; role: 'customer' | 'agent'; content: string; time: string; citations?: MessageCitation[] };

@@ -1,5 +1,5 @@
 import { Avatar, Button, Modal, Tag, message as toast } from 'antd';
-import { EllipsisOutlined, MenuOutlined, SearchOutlined, UserSwitchOutlined } from '@ant-design/icons';
+import { MenuOutlined, SearchOutlined, UserSwitchOutlined } from '@ant-design/icons';
 import type { Conversation, ConversationStatus } from '../types/conversation';
 import { useWorkbenchStore } from '../stores';
 
@@ -17,11 +17,14 @@ const stateLabel: Record<ConversationStatus, string> = {
 export function ChatHeader({ active }: { active?: Conversation }) {
   const status = useWorkbenchStore((state) => state.status);
   const setStatus = useWorkbenchStore((state) => state.setStatus);
-  const toggleDetail = useWorkbenchStore((state) => state.toggleDetail);
 
   const takeover = () => {
+    /** 没有选中真实会话时，不能改变会话处理状态。 */
+    if (!active) return;
+
     if (status === 'human_takeover') {
-      setStatus('streaming');
+      /** 交还 AI 后恢复为空闲态，而不是伪装成正在生成回答。 */
+      setStatus('idle');
       toast.success('会话已交还 AI');
     } else {
       Modal.confirm({
@@ -51,10 +54,14 @@ export function ChatHeader({ active }: { active?: Conversation }) {
       </div>
       <div>
         <Button icon={<SearchOutlined />}>会话轨迹</Button>
-        <Button type="primary" icon={<UserSwitchOutlined />} onClick={takeover}>
+        <Button
+          type="primary"
+          icon={<UserSwitchOutlined />}
+          onClick={takeover}
+          disabled={!active || status === 'sending' || status === 'streaming'}
+        >
           {status === 'human_takeover' ? '交还 AI' : '接管会话'}
         </Button>
-        <Button icon={<EllipsisOutlined />} onClick={toggleDetail} />
       </div>
     </header>
   );

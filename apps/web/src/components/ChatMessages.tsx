@@ -12,6 +12,33 @@ type KnowledgeSourcePreview = {
     index: number;
     content: string;
     headingPath: string[];
+  }>; 
+};
+
+/** 精确引用接口返回的一条知识切片。 */
+type KnowledgeCitationChunk = {
+  documentId: string;
+  chunkId: string;
+  fileName: string;
+  index: number;
+  content: string;
+  characterCount: number;
+  headingPath: string[];
+};
+
+/**
+ * 引用弹窗使用的统一数据结构。
+ * precise 用于区分新引用和没有 chunkId 的历史引用。
+ */
+type KnowledgeSourceResult = {
+  documentId: string;
+  fileName: string;
+  precise: boolean;
+  chunks: Array<{
+    index: number;
+    content: string;
+    characterCount?: number;
+    headingPath: string[];
   }>;
 };
 
@@ -25,18 +52,81 @@ export function ChatMessages({ messages }: { messages: LocalMessage[] }) {
     data: sourcePreview,
     isLoading: sourceLoading,
     error: sourceError,
-  } = useQuery<KnowledgeSourcePreview>({
-    queryKey: ['knowledge-source', selectedSource?.source],
+  } = useQuery<KnowledgeSourceResult>({
+    /**
+     * 同一文档可能命中多个切片，因此缓存键必须包含 chunkId。
+     * 否则 React Query 可能复用该文档中另一条引用的缓存。
+     */
+    queryKey: [
+      'knowledge-source',
+      selectedSource?.source,
+      selectedSource?.chunkId,
+    ],
     enabled: Boolean(selectedSource),
     queryFn: async ({ signal }) => {
       const documentId = selectedSource?.source;
-      if (!documentId) throw new Error('缺少来源文档 ID');
+      const chunkId = selectedSource?.chunkId;
+
+      if (!documentId) {
+        throw new Error('缺少来源文档 ID');
+      }
+
+      /**
+       * 新生成的引用包含 chunkId，只读取模型实际使用的一条切片。
+       */
+      if (chunkId) {
+        const response = await fetch(
+          `/api/knowledge/documents/` +
+            `${encodeURIComponent(documentId)}/chunks/` +
+            `${encodeURIComponent(chunkId)}`,
+          { signal },
+        );
+
+        if (!response.ok) {
+          throw new Error(`读取精确引用失败：HTTP ${response.status}`);
+        }
+
+        const chunk = (await response.json()) as KnowledgeCitationChunk;
+
+        /**
+         * 转换为弹窗统一结构。chunks 只有一项，
+         * 因而不会继续展示整篇文档的所有切片。
+         */
+        return {
+          documentId: chunk.documentId,
+          fileName: chunk.fileName,
+          precise: true,
+          chunks: [
+            {
+              index: chunk.index,
+              content: chunk.content,
+              characterCount: chunk.characterCount,
+              headingPath: chunk.headingPath,
+            },
+          ],
+        };
+      }
+
+      /**
+       * 兼容历史消息：旧引用没有 chunkId，只能读取整篇文档切片。
+       */
       const response = await fetch(
         `/api/knowledge/documents/${encodeURIComponent(documentId)}/chunks`,
         { signal },
       );
-      if (!response.ok) throw new Error(`读取来源失败：HTTP ${response.status}`);
-      return (await response.json()) as KnowledgeSourcePreview;
+
+      if (!response.ok) {
+        throw new Error(`读取历史来源失败：HTTP ${response.status}`);
+      }
+
+      const document = (await response.json()) as KnowledgeSourcePreview;
+
+      return {
+        documentId: document.documentId,
+        fileName: document.fileName,
+        precise: false,
+        chunks: document.chunks,
+      };
     },
   });
 
@@ -97,7 +187,21 @@ export function ChatMessages({ messages }: { messages: LocalMessage[] }) {
           <Alert type="error" showIcon message="读取知识来源失败" />
         ) : sourcePreview?.chunks.length ? (
           <div className="knowledge-source-content">
-            <p>来源文档：{sourcePreview.fileName}</p>
+            <p>
+              来源文档：{sourcePreview.fileName}
+              {' '}
+              {sourcePreview.precise ? (
+                /**
+                 * 新回答带有 chunkId，只展示模型实际使用的知识片段。
+                 */
+                <Tag color="green">精确引用片段</Tag>
+              ) : (
+                /**
+                 * 历史回答没有 chunkId，只能兼容展示整篇文档切片。
+                 */
+                <Tag>历史引用 · 全文切片</Tag>
+              )}
+            </p>
             {sourcePreview.chunks.map((chunk) => (
               <section className="knowledge-preview-chunk" key={chunk.index}>
                 <strong>切片 {chunk.index + 1}</strong>

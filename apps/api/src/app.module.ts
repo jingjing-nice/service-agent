@@ -6,6 +6,7 @@ import { LlmModule } from './modules/llm/llm.module.js';
 import { MessagesModule } from './modules/messages/messages.module.js';
 import { DatabaseModule } from './database/database.module.js';
 import { KnowledgeModule } from './modules/knowledge/knowledge.module.js';
+import { ConversationsModule } from './modules/conversations/conversations.module.js';
 
 /**
  * 应用根模块。
@@ -31,6 +32,15 @@ import { KnowledgeModule } from './modules/knowledge/knowledge.module.js';
     LlmModule,
     // 注册消息模块，使应用可以访问会话消息接口。
     MessagesModule,
+    /**
+    * 注册会话模块。
+    *
+    * 注册后，以下接口开始被 NestJS 识别：
+    * POST /api/conversations
+    * GET  /api/conversations
+    * GET  /api/conversations/:id
+    */
+    ConversationsModule
   ],
 
   // 注册应用基础接口，例如 /api/health。
@@ -39,4 +49,4 @@ import { KnowledgeModule } from './modules/knowledge/knowledge.module.js';
   // 注册 AppController 依赖的基础服务。
   providers: [AppService],
 })
-export class AppModule {}
+export class AppModule { }

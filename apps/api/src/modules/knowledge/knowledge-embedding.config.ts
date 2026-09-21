@@ -1,4 +1,4 @@
-import { KNOWLEDGE_VECTOR_DIMENSION } from './knowledge-vector.types.js';
+import { KNOWLEDGE_VECTOR_DIMENSION } from './vector/knowledge-vector.types.js';
 
 /** 在发起模型请求前校验配置，避免生成与 Milvus 字段维度不匹配的向量。 */
 export function getKnowledgeEmbeddingConfig() {

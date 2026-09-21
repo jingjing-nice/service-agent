@@ -1,6 +1,5 @@
 /**
  * Prisma 7 Client 生成配置。
- *
  * 生成代码放在 src/generated/prisma，
  * 方便 NestJS 使用 ESM 相对路径导入。
  */
@@ -19,7 +18,6 @@ datasource db {
 
 /**
  * 知识文档处理状态。
- *
  * UPLOADED：原文件已经保存，尚未开始处理。
  * PARSING：正在解析和切片。
  * CHUNKED：切片已保存，尚未生成向量，不能参与检索。
@@ -35,8 +33,40 @@ enum KnowledgeDocumentStatus {
 }
 
 /**
+ * 知识文档的发布状态。
+ * 该状态与 KnowledgeDocumentStatus 的职责不同：
+ * KnowledgeDocumentStatus 表示技术处理进度，
+ * 例如是否完成解析、切片和向量化。
+ * KnowledgePublishStatus 表示文档是否允许参与正式问答。
+ * 文档只有同时满足：
+ * 1. status = READY；
+ * 2. publishStatus = PUBLISHED；
+ * 才能参与正式 RAG 检索。
+ */
+enum KnowledgePublishStatus {
+  /**
+   * 草稿状态。
+   * 文档可以进行切片预览和草稿检索测试，
+   * 但不能参与面向用户的正式问答。
+   */
+  DRAFT
+
+  /**
+   * 已发布状态。
+   * 文档允许参与正式问答。
+   */
+  PUBLISHED
+
+  /**
+   * 已归档状态。
+   * 文档及其向量仍然保留，
+   * 但不能继续参与正式检索。
+   */
+  ARCHIVED
+}
+
+/**
  * 知识库中的一份原始文档。
- *
  * 这里只保存文档元数据。
  * Markdown 原文件保存在 MinIO，
  * 后续文本切片和向量分别保存。
@@ -63,35 +93,68 @@ model KnowledgeDocument {
   /// 文件内容的 SHA-256，用于识别重复上传。
   sha256 String @db.Char(64)
 
-  /// 当前文档处理状态。
+  /**
+   * 当前文档的技术处理状态。
+   * 该字段描述上传、解析、切片和向量化进度，
+   * 不代表文档是否已经允许用于正式问答。
+   */
   status KnowledgeDocumentStatus @default(UPLOADED)
 
-  /// 对外稳定的错误码，不保存内部异常堆栈。
+  /**
+   * 当前文档的业务发布状态。
+   * 新上传和新索引的文档默认都是 DRAFT。
+   * 只有显式执行发布操作后才会变成 PUBLISHED。
+   */
+  publishStatus KnowledgePublishStatus @default(DRAFT) @map("publish_status")
+
+  /**
+   * 当前文档对应的向量索引版本。
+   * 示例：
+   * v1-550e8400-e29b-41d4-a716-446655440000
+   * 上传但尚未建立索引时，该字段为空。
+   */
+  indexVersion String? @map("index_version") @db.VarChar(150)
+
+  /**
+   * 文档最近一次成功发布的时间。
+   * 草稿文档从未发布时，该字段为空。
+   */
+  publishedAt DateTime? @map("published_at")
+
+  /**
+   * 对外稳定的错误码。
+   * 这里只保存稳定错误码，
+   * 不保存内部异常堆栈或敏感连接信息。
+   */
   errorCode String? @map("error_code") @db.VarChar(100)
 
   /// 文档创建时间。
-  createdAt DateTime @default(now()) @map("created_at")
+  createdAt       DateTime @default(now()) @map("created_at")
   // 旧文档暂时可为空，后续回填后再考虑设为必填。
-  knowledgeBaseId String? @map("knowledge_base_id") @db.Uuid
+  knowledgeBaseId String?  @map("knowledge_base_id") @db.Uuid
 
   knowledgeBase KnowledgeBase? @relation(fields: [knowledgeBaseId, tenantId], references: [id, tenantId], onDelete: Restrict)
 
   /// 文档最后更新时间。
-  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
   /// 该文档解析得到的切片。
-  chunks KnowledgeChunk[]
+  chunks    KnowledgeChunk[]
 
   /**
    * 同一租户不能重复保存内容完全相同的文件。
    * 不同租户可以分别上传相同文件。
    */
   @@unique([tenantId, sha256])
-
   /// 支持按租户和处理状态查询文档。
   @@index([tenantId, status])
-
   @@index([tenantId, knowledgeBaseId])
-
+  /**
+   * 支持查询指定租户、知识库和发布状态下的文档。
+   * 正式 RAG 检索回查 PostgreSQL 时，
+   * 会使用 tenantId、knowledgeBaseId 和 publishStatus
+   * 共同过滤文档。
+   */
+  @@index([tenantId, knowledgeBaseId, publishStatus])
   /// PostgreSQL中的实际表名。
   @@map("knowledge_documents")
 }
@@ -124,26 +187,239 @@ model KnowledgeChunk {
 
   /// 同一文档不能有两个相同编号的切片。
   @@unique([documentId, chunkIndex])
-
   /// 支持按租户和文档查询切片。
   @@index([tenantId, documentId])
-
   /// PostgreSQL 中的实际表名。
   @@map("knowledge_chunks")
 }
 
-
 /// 一个租户下的知识库；向量检索需按租户和知识库共同过滤。
 model KnowledgeBase {
-  id        String   @id @default(uuid()) @db.Uuid
-  tenantId  String   @map("tenant_id") @db.VarChar(100)
-  name      String   @db.VarChar(100)
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id        String              @id @default(uuid()) @db.Uuid
+  tenantId  String              @map("tenant_id") @db.VarChar(100)
+  name      String              @db.VarChar(100)
+  createdAt DateTime            @default(now()) @map("created_at")
+  updatedAt DateTime            @updatedAt @map("updated_at")
   documents KnowledgeDocument[]
+
   /// 同一租户内知识库名称不重复。
   @@unique([tenantId, name])
   /// 供后续文档建立同时包含租户 ID 的关联。
   @@unique([id, tenantId])
   @@map("knowledge_bases")
+}
+
+/**
+ * 会话当前所处的业务状态。
+ * 状态值使用大写形式存储在 PostgreSQL 中，
+ * API 返回数据时再转换为前端使用的小写格式。
+ */
+enum ConversationStatus {
+  /// 会话处于空闲状态，可以接收新消息。
+  IDLE
+
+  /// 客户消息已经发送，正在等待后端处理。
+  SENDING
+
+  /// 大模型正在通过 SSE 返回流式内容。
+  STREAMING
+
+  /// 当前流程包含高风险操作，正在等待人工审批。
+  WAITING_APPROVAL
+
+  /// 会话已经转交人工客服，Agent 暂停自动回复。
+  HUMAN_TAKEOVER
+
+  /// 当前轮对话已经正常结束。
+  COMPLETED
+
+  /// 当前轮对话执行失败，可以由用户重新发起。
+  FAILED
+}
+
+/**
+ * 消息发送者类型。
+ */
+enum MessageRole {
+  /// 客户发送的消息。
+  CUSTOMER
+
+  /// AI Agent 生成的消息。
+  AGENT
+
+  /// 系统生成的状态或流程消息。
+  SYSTEM
+}
+
+/**
+ * 客户与智能客服之间的一次会话。
+ * Conversation.id 后续可以直接作为 LangGraph 的 thread_id，
+ * 保证审批暂停和恢复使用同一条执行线程。
+ */
+model Conversation {
+  /**
+   * 会话唯一编号。
+   * 使用 PostgreSQL UUID，避免使用容易被猜测的连续数字 ID。
+   */
+  id String @id @default(uuid()) @db.Uuid
+
+  /**
+   * 会话所属租户。
+   * 当前个人项目使用 DEFAULT_TENANT_ID；
+   * 后续实现 JWT 后，应从服务端登录上下文读取。
+   */
+  tenantId String @map("tenant_id") @db.VarChar(100)
+
+  /**
+   * 客户的业务编号。
+   * 目前不关联用户表，允许使用演示客户编号。
+   */
+  customerId String @map("customer_id") @db.VarChar(100)
+
+  /// 客服工作台展示的客户名称。
+  customerName String @map("customer_name") @db.VarChar(100)
+
+  /**
+   * 会话来源渠道。
+   * 例如 WEB、APP、WECHAT。
+   * 当前演示项目默认使用 WEB。
+   */
+  channel String @default("WEB") @db.VarChar(50)
+
+  /**
+   * 会话主题。
+   * 可以在创建会话时传入，也可以在收到首条消息后自动生成。
+   */
+  topic String? @db.VarChar(200)
+
+  /// 当前会话的可公开状态。
+  status ConversationStatus @default(IDLE)
+
+  /**
+   * 最近一条消息的简短内容。
+   * 这是为会话列表准备的冗余字段，
+   * 避免每次展示列表时都查询 messages 表。
+   */
+  lastMessage String? @map("last_message") @db.VarChar(500)
+
+  /**
+   * 最近一条消息的创建时间。
+   * 会话列表通过该字段倒序排列。
+   */
+  lastMessageAt DateTime? @map("last_message_at")
+
+  /**
+   * 当前会话使用的 Agent 配置版本。
+   * 暂时允许为空，后续实现 Agent 配置版本管理时使用。
+   */
+  agentVersion String? @map("agent_version") @db.VarChar(100)
+
+  /// 会话创建时间。
+  createdAt DateTime @default(now()) @map("created_at")
+
+  /// 会话最后更新时间，由 Prisma 自动维护。
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// 当前会话包含的全部消息。
+  messages Message[]
+
+  /**
+   * 支持按租户和最近消息时间查询会话列表。
+   */
+  @@index([tenantId, lastMessageAt])
+  /**
+   * 支持查询一个租户下指定客户的历史会话。
+   */
+  @@index([tenantId, customerId])
+  /// PostgreSQL 中对应的表名。
+  @@map("conversations")
+}
+
+/**
+ * 客户、Agent 或系统产生的一条完整消息。
+ */
+model Message {
+  /// 消息唯一编号。
+  id String @id @default(uuid()) @db.Uuid
+
+  /// 消息所属的会话 ID。
+  conversationId String @map("conversation_id") @db.Uuid
+
+  /**
+   * 消息所属租户。
+   * 虽然可以通过 Conversation 间接取得 tenantId，
+   * 这里仍然冗余保存，以便所有消息查询强制添加租户条件。
+   */
+  tenantId String @map("tenant_id") @db.VarChar(100)
+
+  /// 消息发送者。
+  role MessageRole
+
+  /// 消息正文，不限制为短字符串。
+  content String @db.Text
+
+  /**
+   * AI 回答引用的知识来源。
+   * JSON 示例：
+   * [
+   * {
+   * "index": 1,
+   * "title": "退款政策",
+   * "source": "document-uuid"
+   * }
+   * ]
+   */
+  citations Json?
+
+  /**
+   * 本轮模型调用的追踪编号。
+   * 后续工具调用和审批记录将使用相同 traceId，
+   * 从而还原一次回答的完整执行过程。
+   */
+  traceId String? @map("trace_id") @db.VarChar(100)
+
+  /**
+   * 前端为本次请求生成的唯一编号。
+   * 用于识别网络重试，避免重复保存同一条消息。
+   */
+  requestId String? @map("request_id") @db.VarChar(150)
+
+  /// 生成这条回答时使用的模型名称。
+  modelName String? @map("model_name") @db.VarChar(100)
+
+  /// 本次模型调用的输入 Token 数量。
+  inputTokens Int? @map("input_tokens")
+
+  /// 本次模型调用的输出 Token 数量。
+  outputTokens Int? @map("output_tokens")
+
+  /// 消息创建时间。
+  createdAt DateTime @default(now()) @map("created_at")
+
+  /**
+   * 消息与会话的关联关系。
+   * fields 指定本模型的外键字段 conversationId；
+   * references 指定关联 Conversation 模型的 id；
+   * onDelete: Cascade 表示删除会话时自动删除所属消息，
+   * 防止数据库中遗留孤立消息。
+   * Prisma 字段声明必须写在同一行，
+   * @relation 参数不能像 TypeScript 函数一样拆成多行。
+   */
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  /**
+   * 同一会话中，同一个 requestId 只能保存一次。
+   * requestId 允许为空，因此手工创建的消息不会互相冲突。
+   */
+  @@unique([conversationId, requestId])
+  /**
+   * 支持按租户、会话和时间查询历史消息。
+   */
+  @@index([tenantId, conversationId, createdAt])
+  /**
+   * 支持通过 traceId 查询一次回答的完整记录。
+   */
+  @@index([traceId])
+  /// PostgreSQL 中对应的表名。
+  @@map("messages")
 }

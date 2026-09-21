@@ -8,7 +8,7 @@ import {
   Post,
   Req,
   NotFoundException,
-  Query
+  Query,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { FastifyRequest } from 'fastify';
@@ -47,7 +47,7 @@ export class KnowledgeController {
      * 不接受客户端自行传入 tenantId。
      */
     private readonly configService: ConfigService,
-  ) { }
+  ) {}
 
   /**
    * 接收并校验一份知识文档。
@@ -204,6 +204,75 @@ export class KnowledgeController {
     );
   }
 
+  /**
+   * 查询回答实际引用的单个知识切片。
+   *
+   * 请求示例：
+   *
+   * GET /api/knowledge/documents/{documentId}/chunks/{chunkId}
+   *
+   * 与 GET /:id/chunks 的区别：
+   * - /:id/chunks 返回整篇文档的全部切片；
+   * - 当前接口只返回回答真正引用的一条切片。
+   *
+   * 当前接口会返回知识正文，因此在正式鉴权完成前，
+   * 与完整切片预览接口保持相同限制：只允许本地开发环境访问。
+   */
+  @Get(':id/chunks/:chunkId')
+  async findCitationChunk(
+    /**
+     * 引用所属的文档 ID。
+     *
+     * ParseUUIDPipe 会在调用 Service 前拒绝非法 UUID，
+     * 避免无效参数进入数据库查询。
+     */
+    @Param(
+      'id',
+      new ParseUUIDPipe({
+        version: '4',
+      }),
+    )
+    documentId: string,
+
+    /**
+     * 回答实际引用的知识切片 ID。
+     *
+     * 同样要求是 UUID v4。
+     */
+    @Param(
+      'chunkId',
+      new ParseUUIDPipe({
+        version: '4',
+      }),
+    )
+    chunkId: string,
+
+    /**
+     * 用于验证当前请求是否来自允许的本地开发环境。
+     */
+    @Req()
+    request: FastifyRequest,
+  ) {
+    /**
+     * 单个切片仍然属于企业知识正文，
+     * 不能因为返回内容较少就跳过访问限制。
+     */
+    this.assertLocalDevelopmentRequest(request);
+
+    /**
+     * tenantId 由服务端上下文提供。
+     *
+     * Service 会进一步验证：
+     * 1. 切片属于该文档；
+     * 2. 切片属于当前租户；
+     * 3. 文档也属于当前租户。
+     */
+    return this.knowledgeService.findCitationChunk(
+      this.getTenantId(),
+      documentId,
+      chunkId,
+    );
+  }
   @Post(':id/chunks')
   async saveChunks(
     @Param('id', new ParseUUIDPipe({ version: '4' })) documentId: string,
@@ -234,6 +303,61 @@ export class KnowledgeController {
     );
   }
 
+  /**
+   * 发布指定文档的当前草稿索引。
+   *
+   * 请求：
+   * POST /api/knowledge/documents/:id/publish
+   *
+   * 当前项目尚未接入正式管理员鉴权，
+   * 所以该管理接口只允许本机开发请求访问。
+   *
+   * 发布成功后：
+   * 1. Milvus 中当前版本的向量变为 PUBLISHED；
+   * 2. PostgreSQL 文档变为 PUBLISHED；
+   * 3. 文档可以参与正式 RAG 检索。
+   */
+  @Post(':id/publish')
+  async publishDocument(
+    /**
+     * 文档 ID 必须是 UUID v4。
+     *
+     * 非法 ID 会在进入业务服务前返回 HTTP 400，
+     * 避免把无效参数传入 Prisma 和 Milvus。
+     */
+    @Param(
+      'id',
+      new ParseUUIDPipe({
+        version: '4',
+      }),
+    )
+    documentId: string,
+
+    /**
+     * FastifyRequest 用于检查请求来源 IP。
+     */
+    @Req() request: FastifyRequest,
+  ) {
+    /**
+     * 在尚未实现 JWT 和管理员权限前，
+     * 发布操作只允许本机开发环境调用。
+     *
+     * 非本机请求和生产环境统一返回 404，
+     * 不公开该管理接口是否存在。
+     */
+    this.assertLocalDevelopmentRequest(request);
+
+    /**
+     * tenantId 由服务端配置确定。
+     *
+     * 不接受浏览器在请求体中传入 tenantId，
+     * 避免伪造租户发布其他企业的知识文档。
+     */
+    return this.knowledgeService.publishDocument(
+      this.getTenantId(),
+      documentId,
+    );
+  }
 
   private getTenantId(): string {
     // 租户只能由服务端确定，不能信任客户端传来的 tenantId。

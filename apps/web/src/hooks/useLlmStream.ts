@@ -87,36 +87,83 @@ export function useLlmStream() {
             onCitation: ({ index,
                 title,
                 source,
+                chunkId,
                 page }) => {
                 /**
  * SSE 身份字段已经由 API 层完成校验，
  * Store 只保存页面展示所需的信息。
+ *
+ * chunkId 用于点击来源时只读取模型实际使用的切片；
+ * 旧消息没有该字段时，来源弹窗仍会降级展示整篇文档切片。
  */
                 appendStreamingCitation({
                     index,
                     title,
                     source,
+                    chunkId,
                     page
                 })
 
             },
             // 收到完成事件后，将 streamingText 保存为一条正式的 AI 消息。
+            /**
+        * SSE 收到 message.completed 后执行。
+        *
+        * 此时后端已经完成：
+        * 1. 保存客户消息；
+        * 2. 保存 AI 回答；
+        * 3. 保存引用；
+        * 4. 更新会话最近消息和最近消息时间。
+        */
             onCompleted: () => {
-                // 先把完整回答放入本地消息，避免页面出现短暂空白。
+                /**
+                 * 先把完整流式回答转换成一条本地正式消息。
+                 *
+                 * 在 React Query 重新请求数据库期间，
+                 * 页面仍然可以立即显示完整回答，不会短暂消失。
+                 */
                 saveAssistantMessage();
-                // 请求已经自然结束，不再需要保存关闭函数。
+
+                /**
+                 * SSE 已经正常结束，
+                 * 不再需要保留关闭连接的函数。
+                 */
                 closeStreamRef.current = null;
 
                 /**
- * 后端已经保存了用户问题和 AI 回答。
- *
- * invalidateQueries 会重新请求：
- * GET /api/conversations/:conversationId/messages
- */
-                void queryClient.invalidateQueries({ queryKey: ['messages', conversationId] }).then(() => {
-                    // 后端数据加载完成后，清除重复的前端临时消息。
-                    clearLocalMessages()
-                })
+                 * 同时刷新消息详情和会话列表。
+                 *
+                 * 消息接口刷新后，中间聊天区域会使用数据库数据；
+                 * 会话列表刷新后，左侧 preview 和 time 会立即更新。
+                 */
+                void Promise.all([
+                    /**
+                     * 重新请求：
+                     * GET /api/conversations/:conversationId/messages
+                     */
+                    queryClient.invalidateQueries({
+                        queryKey: ['messages', conversationId],
+                    }),
+
+                    /**
+                     * 重新请求：
+                     * GET /api/conversations
+                     *
+                     * WorkbenchPage 当前使用的会话列表 queryKey
+                     * 必须与这里保持一致。
+                     */
+                    queryClient.invalidateQueries({
+                        queryKey: ['conversations'],
+                    }),
+                ]).then(() => {
+                    /**
+                     * 等数据库中的会话和消息都加载完成后，
+                     * 再清除 Zustand 中的临时消息。
+                     *
+                     * 这样可以避免清除过早导致聊天区域闪烁。
+                     */
+                    clearLocalMessages();
+                });
             },
             onError: (error) => {
                 failStreaming(error.message);
