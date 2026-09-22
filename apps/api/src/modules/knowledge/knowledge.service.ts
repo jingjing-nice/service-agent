@@ -4,6 +4,8 @@ import { KnowledgeDocumentCreationService } from './documents/knowledge-document
 import { KnowledgeDocumentQueryService } from './documents/knowledge-document-query.service.js';
 import type { ValidatedKnowledgeFile } from './knowledge-file.validator.js';
 import { KnowledgeRagService } from './knowledge-rag.service.js';
+import { KnowledgeLifecycleService } from './knowledge-lifecycle.service.js';
+import { KnowledgeProcessingQueueService } from './jobs/knowledge-processing-queue.service.js';
 
 /** Stable application facade for knowledge controllers and other modules. */
 @Injectable()
@@ -13,6 +15,8 @@ export class KnowledgeService {
     private readonly queryService: KnowledgeDocumentQueryService,
     private readonly chunkService: KnowledgeChunkService,
     private readonly ragService: KnowledgeRagService,
+    private readonly lifecycleService: KnowledgeLifecycleService,
+    private readonly processingQueue: KnowledgeProcessingQueueService,
   ) {}
 
   createDocument(tenantId: string, file: ValidatedKnowledgeFile) {
@@ -73,5 +77,21 @@ export class KnowledgeService {
 
   publishDocument(tenantId: string, documentId: string) {
     return this.ragService.publishDocument(tenantId, documentId);
+  }
+
+  unpublishDocument(tenantId: string, documentId: string) {
+    return this.lifecycleService.unpublish(tenantId, documentId);
+  }
+
+  archiveDocument(tenantId: string, documentId: string) {
+    return this.lifecycleService.archive(tenantId, documentId);
+  }
+
+  deleteDocument(tenantId: string, documentId: string) {
+    return this.lifecycleService.delete(tenantId, documentId);
+  }
+
+  getProcessingStatus(documentId: string) {
+    return this.processingQueue.getStatus(documentId);
   }
 }

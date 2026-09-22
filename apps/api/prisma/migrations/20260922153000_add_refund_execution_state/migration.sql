@@ -1,0 +1,6 @@
+ALTER TYPE "RefundRequestStatus" ADD VALUE IF NOT EXISTS 'EXECUTING';
+ALTER TYPE "RefundRequestStatus" ADD VALUE IF NOT EXISTS 'EXECUTION_FAILED';
+
+ALTER TABLE "refund_requests"
+ADD COLUMN "gateway_refund_id" VARCHAR(100),
+ADD COLUMN "execution_error" VARCHAR(500);

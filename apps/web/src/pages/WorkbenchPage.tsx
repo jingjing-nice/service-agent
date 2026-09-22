@@ -5,10 +5,12 @@ import { ChatPanel } from '../components/ChatPanel';
 import { ConversationInbox } from '../components/ConversationInbox';
 import { KnowledgePreviewModal } from '../components/KnowledgePreviewModal';
 import { WorkbenchRail } from '../components/WorkbenchRail';
+import { RefundApprovalModal } from '../components/RefundApprovalModal';
 import { useWorkbenchStore } from '../stores';
 
 export function WorkbenchPage() {
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [refundApprovalOpen, setRefundApprovalOpen] = useState(false);
   const activeId = useWorkbenchStore((state) => state.activeId);
   const selectConversation = useWorkbenchStore((state) => state.select);
   const localMessages = useWorkbenchStore((state) => state.localMessages);
@@ -58,12 +60,19 @@ export function WorkbenchPage() {
 
   return (
     <div className="workbench">
-      <WorkbenchRail onOpenKnowledge={() => setPreviewOpen(true)} />
+      <WorkbenchRail
+        onOpenKnowledge={() => setPreviewOpen(true)}
+        onOpenRefunds={() => setRefundApprovalOpen(true)}
+      />
       <ConversationInbox conversations={conversations} />
       <ChatPanel active={active} messages={displayedMessages} />
       <KnowledgePreviewModal
         open={previewOpen}
         onClose={() => setPreviewOpen(false)}
+      />
+      <RefundApprovalModal
+        open={refundApprovalOpen}
+        onClose={() => setRefundApprovalOpen(false)}
       />
     </div>
   );

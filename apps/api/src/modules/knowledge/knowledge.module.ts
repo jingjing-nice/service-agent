@@ -11,6 +11,8 @@ import { KnowledgeRetrievalService } from './retrieval/knowledge-retrieval.servi
 import { KnowledgeChunkService } from './documents/knowledge-chunk.service.js';
 import { KnowledgeDocumentCreationService } from './documents/knowledge-document-creation.service.js';
 import { KnowledgeDocumentQueryService } from './documents/knowledge-document-query.service.js';
+import { KnowledgeLifecycleService } from './knowledge-lifecycle.service.js';
+import { KnowledgeProcessingQueueService } from './jobs/knowledge-processing-queue.service.js';
 
 @Module({
   controllers: [KnowledgeController],
@@ -26,6 +28,8 @@ import { KnowledgeDocumentQueryService } from './documents/knowledge-document-qu
     KnowledgeIndexingService,
     KnowledgePublishingService,
     KnowledgeRagService,
+    KnowledgeLifecycleService,
+    KnowledgeProcessingQueueService,
   ],
   exports: [KnowledgeService],
 })

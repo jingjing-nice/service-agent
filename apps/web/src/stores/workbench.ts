@@ -86,6 +86,12 @@ type WorkbenchState = {
   /** 将已经生成完毕的 AI 回答加入本地消息历史。 */
   saveAssistantMessage: () => void;
 
+  /**
+   * 退款工作流进入人工审批中断时，保存一条等待审批的提示消息。
+   * 此时后端尚未持久化结果，因此不清除本地消息。
+   */
+  saveWaitingApprovalMessage: (content: string) => void;
+
 
   /**
    * 清空已经同步到后端的临时消息。
@@ -165,6 +171,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set) => ({
     status: 'sending',
     // 清空上一轮尚未处理完的流式文字。
     streamingText: '',
+    streamingCitations: [],
     // 清空上一轮请求的错误信息。
     streamError: null
   }),
@@ -174,6 +181,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set) => ({
     set({
       status: 'streaming',
       streamingText: '',
+      streamingCitations: [],
       streamError: null,
     }),
 
@@ -283,4 +291,21 @@ export const useWorkbenchStore = create<WorkbenchState>((set) => ({
     set({
       localMessages: [],
     }),
+
+  // 退款进入人工审批：展示一条等待审批的 Agent 消息，结束流式状态。
+  saveWaitingApprovalMessage: (content) =>
+    set((state) => ({
+      status: 'completed',
+      localMessages: [
+        ...state.localMessages,
+        {
+          id: crypto.randomUUID(),
+          role: 'agent',
+          content,
+          time: createMessageTime(),
+        },
+      ],
+      streamingText: '',
+      streamingCitations: [],
+    })),
 }));

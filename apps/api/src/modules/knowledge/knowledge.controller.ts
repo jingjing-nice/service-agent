@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -52,8 +53,8 @@ export class KnowledgeController {
   /**
    * 接收并校验一份知识文档。
    *
-   * 校验 multipart 文件后交给服务层保存原文件、元数据和 Markdown 切片。
-   * 向量化尚未接入。
+   * 校验 multipart 文件后保存原文件和元数据，再将解析、切片及向量化
+   * 任务投递到 BullMQ。接口返回成功只表示文档已接收，不表示索引已就绪。
    */
   @Post()
   async uploadDocument(@Req() request: FastifyRequest) {
@@ -178,6 +179,15 @@ export class KnowledgeController {
       this.getTenantId(),
       documentId,
     );
+  }
+
+  @Get(':id/processing-status')
+  processingStatus(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) documentId: string,
+    @Req() request: FastifyRequest,
+  ) {
+    this.assertLocalDevelopmentRequest(request);
+    return this.knowledgeService.getProcessingStatus(documentId);
   }
 
   @Get()
@@ -357,6 +367,39 @@ export class KnowledgeController {
       this.getTenantId(),
       documentId,
     );
+  }
+
+  @Post(':id/unpublish')
+  unpublishDocument(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) documentId: string,
+    @Req() request: FastifyRequest,
+  ) {
+    this.assertLocalDevelopmentRequest(request);
+    return this.knowledgeService.unpublishDocument(
+      this.getTenantId(),
+      documentId,
+    );
+  }
+
+  @Post(':id/archive')
+  archiveDocument(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) documentId: string,
+    @Req() request: FastifyRequest,
+  ) {
+    this.assertLocalDevelopmentRequest(request);
+    return this.knowledgeService.archiveDocument(
+      this.getTenantId(),
+      documentId,
+    );
+  }
+
+  @Delete(':id')
+  deleteDocument(
+    @Param('id', new ParseUUIDPipe({ version: '4' })) documentId: string,
+    @Req() request: FastifyRequest,
+  ) {
+    this.assertLocalDevelopmentRequest(request);
+    return this.knowledgeService.deleteDocument(this.getTenantId(), documentId);
   }
 
   private getTenantId(): string {

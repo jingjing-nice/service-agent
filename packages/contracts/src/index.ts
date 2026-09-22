@@ -257,3 +257,81 @@ export const citationEventSchema = baseSseEventSchema.extend({
 export type CitationEvent = z.infer<
   typeof citationEventSchema
 >;
+
+export const knowledgeDocumentStatusSchema = z.enum([
+  'UPLOADED', 'PARSING', 'CHUNKED', 'READY', 'FAILED',
+]);
+
+export const knowledgePublishStatusSchema = z.enum([
+  'DRAFT', 'PUBLISHED', 'ARCHIVED',
+]);
+
+export const knowledgeDocumentSchema = z.object({
+  id: z.uuid(),
+  fileName: z.string().min(1),
+  sizeBytes: z.number().int().nonnegative(),
+  status: knowledgeDocumentStatusSchema,
+  publishStatus: knowledgePublishStatusSchema,
+  indexVersion: z.string().nullable(),
+  publishedAt: z.iso.datetime().optional(),
+  errorCode: z.string().nullable(),
+  canRetryIndex: z.boolean(),
+  canPublish: z.boolean(),
+  createdAt: z.iso.datetime(),
+});
+
+export const knowledgeDocumentListSchema = z.array(knowledgeDocumentSchema);
+
+export const knowledgeChunkPreviewSchema = z.object({
+  documentId: z.uuid(),
+  fileName: z.string().min(1),
+  chunkCount: z.number().int().nonnegative(),
+  chunks: z.array(z.object({
+    index: z.number().int().nonnegative(),
+    content: z.string(),
+    characterCount: z.number().int().nonnegative(),
+    headingPath: z.array(z.string()),
+  })),
+});
+
+export type KnowledgeDocument = z.infer<typeof knowledgeDocumentSchema>;
+export type KnowledgeDocumentStatus = z.infer<typeof knowledgeDocumentStatusSchema>;
+export type KnowledgePublishStatus = z.infer<typeof knowledgePublishStatusSchema>;
+export type KnowledgeChunkPreview = z.infer<typeof knowledgeChunkPreviewSchema>;
+
+// ── 退款工作流 SSE 事件 ────────────────────────────────────────────
+
+/** 工作流步骤名称枚举。 */
+export const workflowStepSchema = z.enum([
+  'rag_retrieve',
+  'extract_order',
+  'query_order',
+  'check_eligibility',
+  'create_refund',
+  'await_approval',
+  'build_result',
+]);
+
+export type WorkflowStep = z.infer<typeof workflowStepSchema>;
+
+/** 工作流步骤完成事件。 */
+export const workflowStepCompletedEventSchema = baseSseEventSchema.extend({
+  type: z.literal('workflow.step_completed'),
+  step: workflowStepSchema,
+  label: z.string().min(1),
+  /** 步骤产出摘要，例如 "找到 3 条退款政策"。 */
+  summary: z.string().optional(),
+});
+
+export type WorkflowStepCompletedEvent = z.infer<typeof workflowStepCompletedEventSchema>;
+
+/** 工作流等待人工审批事件。 */
+export const workflowWaitingApprovalEventSchema = baseSseEventSchema.extend({
+  type: z.literal('workflow.waiting_approval'),
+  refundRequestId: z.string().uuid(),
+  orderNo: z.string().min(1),
+  amount: z.number().nonnegative(),
+  reason: z.string().min(1),
+});
+
+export type WorkflowWaitingApprovalEvent = z.infer<typeof workflowWaitingApprovalEventSchema>;

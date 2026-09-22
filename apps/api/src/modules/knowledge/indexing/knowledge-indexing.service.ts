@@ -1,25 +1,22 @@
 import {
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { Document } from '@langchain/core/documents';
 import { PrismaService } from '../../../database/prisma.service.js';
-import { getKnowledgeEmbeddingConfig } from '../knowledge-embedding.config.js';
-import { KnowledgeEmbeddingService } from '../knowledge-embedding.service.js';
-import {
-  createKnowledgeIndexVersion,
-  hashKnowledgeText,
-} from './knowledge-index.utils.js';
-import { createKnowledgeVectorId } from '../vector/knowledge-vector.schema.js';
+import { createKnowledgeIndexVersion } from './knowledge-index.utils.js';
 import { KnowledgeVectorStoreService } from '../vector/knowledge-vector-store.service.js';
-import type { KnowledgeVectorRecord } from '../vector/knowledge-vector.types.js';
+import type { KnowledgeVectorDocumentMetadata } from '../vector/knowledge-vector.types.js';
 
 /** Offline write path that turns persisted chunks into a complete draft vector index. */
 @Injectable()
 export class KnowledgeIndexingService {
+  private readonly logger = new Logger(KnowledgeIndexingService.name);
+
   constructor(
     private readonly prisma: PrismaService,
-    private readonly embeddingService: KnowledgeEmbeddingService,
     private readonly vectorStore: KnowledgeVectorStoreService,
   ) {}
 
@@ -52,28 +49,27 @@ export class KnowledgeIndexingService {
 
     const knowledgeBaseId = document.knowledgeBaseId;
     const indexVersion = createKnowledgeIndexVersion(document.id);
-    const embeddingModel = getKnowledgeEmbeddingConfig().model;
     let indexedCount = 0;
 
     for (let offset = 0; offset < document.chunks.length; offset += 20) {
       const batch = document.chunks.slice(offset, offset + 20);
-      const embeddings = await this.embeddingService.embedTexts(
-        batch.map((chunk) => chunk.content),
+      const documents = batch.map(
+        (chunk) =>
+          new Document<KnowledgeVectorDocumentMetadata>({
+            id: chunk.id,
+            pageContent: chunk.content,
+            metadata: {
+              chunkId: chunk.id,
+              tenantId: document.tenantId,
+              knowledgeBaseId,
+              documentId: document.id,
+              chunkIndex: chunk.chunkIndex,
+              indexVersion,
+              publishStatus: 'DRAFT',
+            },
+          }),
       );
-      const records: KnowledgeVectorRecord[] = batch.map((chunk, index) => ({
-        id: createKnowledgeVectorId(indexVersion, chunk.id),
-        chunkId: chunk.id,
-        tenantId: document.tenantId,
-        knowledgeBaseId,
-        documentId: document.id,
-        chunkIndex: chunk.chunkIndex,
-        embedding: embeddings[index],
-        embeddingModel,
-        textSha256: hashKnowledgeText(chunk.content),
-        indexVersion,
-        publishStatus: 'DRAFT',
-      }));
-      indexedCount += await this.vectorStore.upsertDraftVectors(records);
+      indexedCount += await this.vectorStore.addDocuments(documents);
     }
 
     if (indexedCount !== document.chunks.length) {
@@ -98,6 +94,29 @@ export class KnowledgeIndexingService {
     if (updated.count !== 1) {
       throw new ConflictException(
         'Document changed during indexing; please retry indexing',
+      );
+    }
+
+    /**
+     * Clean up superseded versions only after PostgreSQL commits the new one.
+     *
+     * Retrieval verifies every hit against the committed indexVersion, so the
+     * old vectors are already unreachable before they are deleted. Deleting
+     * first would instead leave a window where no version can serve answers.
+     */
+    try {
+      await this.vectorStore.deleteObsoleteDocumentVectors(
+        tenantId,
+        knowledgeBaseId,
+        document.id,
+        indexVersion,
+      );
+    } catch (error) {
+      // The database already points at the verified new version. Old rows are
+      // excluded by version checks, so cleanup failure must not roll it back.
+      this.logger.warn(
+        `New index ${indexVersion} is active but obsolete-vector cleanup failed`,
+        error instanceof Error ? error.message : String(error),
       );
     }
 

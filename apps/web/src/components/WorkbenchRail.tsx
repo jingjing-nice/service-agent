@@ -2,14 +2,16 @@ import { Avatar, Badge, Button, Tooltip } from 'antd';
 import {
   BookOutlined,
   CustomerServiceOutlined,
+  DollarOutlined,
   SettingOutlined,
 } from '@ant-design/icons';
 
 type WorkbenchRailProps = {
   onOpenKnowledge: () => void;
+  onOpenRefunds: () => void;
 };
 
-export function WorkbenchRail({ onOpenKnowledge }: WorkbenchRailProps) {
+export function WorkbenchRail({ onOpenKnowledge, onOpenRefunds }: WorkbenchRailProps) {
   return (
     <aside className="rail">
       <div className="logo">Z</div>
@@ -19,6 +21,9 @@ export function WorkbenchRail({ onOpenKnowledge }: WorkbenchRailProps) {
         </Tooltip>
         <Tooltip title="知识库" placement="right">
           <Button type="text" onClick={onOpenKnowledge} icon={<BookOutlined />} />
+        </Tooltip>
+        <Tooltip title="退款审批" placement="right">
+          <Button type="text" onClick={onOpenRefunds} icon={<DollarOutlined />} />
         </Tooltip>
       </nav>
       <div>

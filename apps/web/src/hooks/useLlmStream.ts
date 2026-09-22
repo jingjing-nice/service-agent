@@ -18,6 +18,11 @@ export function useLlmStream() {
   * 不会导致 React 组件重新渲染。
   */
     const closeStreamRef = useRef<(() => void) | null>(null);
+    const lastRequestRef = useRef<{
+        conversationId: string;
+        question: string;
+        requestId: string;
+    } | null>(null);
 
     /**
  * React Query 的缓存管理对象。
@@ -57,10 +62,18 @@ export function useLlmStream() {
 
     const clearLocalMessages = useWorkbenchStore(state => state.clearLocalMessages)
 
+    const saveWaitingApprovalMessage = useWorkbenchStore(
+        (state) => state.saveWaitingApprovalMessage,
+    );
+
     /**
      * 开始一次新的 AI 流式请求。
      */
-    function startNewStream(conversationId: string, question: string) {
+    function startNewStream(
+        conversationId: string,
+        question: string,
+        requestId: string = crypto.randomUUID(),
+    ) {
         // 清空上一次的流式数据和错误。
         closeStreamRef.current?.();
         // // 空上一次回答，并将状态设置为 streaming。
@@ -70,6 +83,7 @@ export function useLlmStream() {
          * 但后端还没有发送 message.started。
          */
         startSending()
+        lastRequestRef.current = { conversationId, question, requestId };
         // 创建新的 SSE 连接。
         closeStreamRef.current = streamAnswer(conversationId, question, {
             /**
@@ -129,6 +143,7 @@ export function useLlmStream() {
                  * 不再需要保留关闭连接的函数。
                  */
                 closeStreamRef.current = null;
+                lastRequestRef.current = null;
 
                 /**
                  * 同时刷新消息详情和会话列表。
@@ -173,8 +188,27 @@ export function useLlmStream() {
                 failStreaming(event.message);
                 // message.failed 是终止事件，连接已经不会再产生新消息。
                 closeStreamRef.current = null;
+            },
+            onWaitingApproval: (event) => {
+                /**
+                 * 退款申请已创建并进入人工审批，展示等待提示。
+                 *
+                 * 此时后端尚未持久化结果消息，因此不调用 clearLocalMessages，
+                 * 保留本地提示直到审批完成后数据库刷新。
+                 */
+                saveWaitingApprovalMessage(
+                    `退款申请 ${event.refundRequestId} 已创建（订单 ${event.orderNo}，金额 ¥${event.amount.toFixed(2)}），正在等待人工审批。`,
+                );
+                closeStreamRef.current = null;
+                lastRequestRef.current = null;
             }
-        });
+        }, requestId);
+    }
+
+    function retryLastStream() {
+        const request = lastRequestRef.current;
+        if (!request) return;
+        startNewStream(request.conversationId, request.question, request.requestId);
     }
 
     /**
@@ -200,6 +234,8 @@ export function useLlmStream() {
     }, []);
     return {
         startNewStream,
+        retryLastStream,
+        canRetry: lastRequestRef.current !== null,
         stopStream,
     };
 }

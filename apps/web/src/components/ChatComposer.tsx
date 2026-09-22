@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Button, Input } from 'antd';
-import { PaperClipOutlined, SendOutlined, StopOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { PaperClipOutlined, ReloadOutlined, SendOutlined, StopOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useLlmStream } from '../hooks';
 import { useWorkbenchStore } from '../stores';
 
@@ -9,7 +9,7 @@ export function ChatComposer() {
   const activeId = useWorkbenchStore((state) => state.activeId);
   const status = useWorkbenchStore((state) => state.status);
   const addUserMessage = useWorkbenchStore((state) => state.addUserMessage);
-  const { startNewStream, stopStream } = useLlmStream();
+  const { startNewStream, retryLastStream, canRetry, stopStream } = useLlmStream();
   const requestInProgress = status === 'streaming' || status === 'sending';
   /** 没有真实会话 ID 时不能调用消息或 SSE 接口。 */
   const hasActiveConversation = Boolean(activeId);
@@ -35,6 +35,11 @@ export function ChatComposer() {
     <footer>
       {status === 'human_takeover' && (
         <div className="takeover"><i />你正在人工接管此会话</div>
+      )}
+      {status === 'failed' && canRetry && (
+        <Button icon={<ReloadOutlined />} onClick={retryLastStream}>
+          重试上一次回答
+        </Button>
       )}
       <div className="composer">
         <Input.TextArea

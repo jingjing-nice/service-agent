@@ -1,52 +1,33 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ArrowRightOutlined,
   CloudUploadOutlined,
+  DeleteOutlined,
   FileTextOutlined,
+  InboxOutlined,
+  RollbackOutlined,
 } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Button, Drawer, Empty, Modal, Popconfirm, Spin } from 'antd';
-
-type ChunkPreview = {
-  documentId: string;
-  fileName: string;
-  chunkCount: number;
-  chunks: Array<{
-    index: number;
-    content: string;
-    characterCount: number;
-    headingPath: string[];
-  }>;
-};
-
-/** 文档上传、切片和索引的技术处理状态。 */
-type KnowledgeDocumentStatus =
-  | 'UPLOADED'
-  | 'PARSING'
-  | 'CHUNKED'
-  | 'INDEXING'
-  | 'READY'
-  | 'FAILED';
-
-/** 文档是否允许参与正式 RAG 检索的业务状态。 */
-type KnowledgePublishStatus = 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
-
-type UploadedDocument = {
-  id: string;
-  fileName: string;
-  sizeBytes: number;
-  /** READY 只表示索引就绪，不等于已经发布。 */
-  status: KnowledgeDocumentStatus;
-  /** 只有 PUBLISHED 文档能够参与正式问答。 */
-  publishStatus: KnowledgePublishStatus;
-  indexVersion: string | null;
-  publishedAt?: string;
-  errorCode: string | null;
-  canRetryIndex: boolean;
-  /** 由后端统一判断，前端不重复拼装发布规则。 */
-  canPublish: boolean;
-  createdAt: string;
-};
+import {
+  Alert,
+  Button,
+  Drawer,
+  Empty,
+  Modal,
+  Popconfirm,
+  Space,
+  Spin,
+} from 'antd';
+import {
+  knowledgeChunkPreviewSchema,
+  knowledgeDocumentListSchema,
+  knowledgeDocumentSchema,
+  type KnowledgeChunkPreview as ChunkPreview,
+  type KnowledgeDocument as UploadedDocument,
+  type KnowledgeDocumentStatus,
+  type KnowledgePublishStatus,
+} from '@service-agent/contracts';
+import { readApiError } from '../api/http';
 
 const documentStatusLabel: Record<KnowledgeDocumentStatus, string> = {
   UPLOADED: '已上传',
@@ -54,7 +35,6 @@ const documentStatusLabel: Record<KnowledgeDocumentStatus, string> = {
   READY: '索引已就绪',
   FAILED: '处理失败',
   CHUNKED: '已切片',
-  INDEXING: '索引中',
 };
 
 /** 发布状态独立展示，避免把“索引就绪”误解成“可用于问答”。 */
@@ -85,20 +65,24 @@ export function KnowledgePreviewModal({
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(
     null,
   );
-  const [selectedDocumentStatus, setSelectedDocumentStatus] = useState<
-    KnowledgeDocumentStatus | null
-  >(null);
-  const [selectedPublishStatus, setSelectedPublishStatus] = useState<
-    KnowledgePublishStatus | null
-  >(null);
+  const [selectedDocumentStatus, setSelectedDocumentStatus] =
+    useState<KnowledgeDocumentStatus | null>(null);
+  const [selectedPublishStatus, setSelectedPublishStatus] =
+    useState<KnowledgePublishStatus | null>(null);
   const [canRetrySelectedIndex, setCanRetrySelectedIndex] = useState(false);
   const [canPublishSelectedDocument, setCanPublishSelectedDocument] =
     useState(false);
-  const [selectedErrorCode, setSelectedErrorCode] = useState<string | null>(null);
+  const [selectedErrorCode, setSelectedErrorCode] = useState<string | null>(
+    null,
+  );
   const [indexing, setIndexing] = useState(false);
   const [indexError, setIndexError] = useState('');
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState('');
+  const [lifecycleAction, setLifecycleAction] = useState<
+    'unpublish' | 'archive' | 'delete' | null
+  >(null);
+  const [lifecycleError, setLifecycleError] = useState('');
   const [indexResult, setIndexResult] = useState<{
     documentId: string;
     chunkCount: number;
@@ -113,13 +97,34 @@ export function KnowledgePreviewModal({
   } = useQuery<UploadedDocument[]>({
     queryKey: ['knowledge-documents'],
     enabled: open, // 弹窗打开时才请求。
+    refetchInterval: (query) => {
+      const rows = query.state.data;
+      return rows?.some((item) =>
+        ['UPLOADED', 'PARSING', 'CHUNKED'].includes(item.status),
+      )
+        ? 2_000
+        : false;
+    },
     queryFn: async () => {
       const response = await fetch('/api/knowledge/documents');
-      if (!response.ok)
-        throw new Error(`获取文档列表失败：HTTP ${response.status}`);
-      return (await response.json()) as UploadedDocument[];
+      if (!response.ok) throw await readApiError(response, '获取文档列表失败');
+      return knowledgeDocumentListSchema.parse(await response.json());
     },
   });
+
+  useEffect(() => {
+    if (!selectedDocumentId) return;
+    const current = documents.find((item) => item.id === selectedDocumentId);
+    if (!current) return;
+    setSelectedDocumentStatus(current.status);
+    setSelectedPublishStatus(current.publishStatus);
+    setCanRetrySelectedIndex(current.canRetryIndex);
+    setCanPublishSelectedDocument(current.canPublish);
+    setSelectedErrorCode(current.errorCode);
+    if (current.status === 'CHUNKED' || current.status === 'READY') {
+      void loadChunkPreview(current.id);
+    }
+  }, [documents, selectedDocumentId]);
 
   async function loadChunkPreview(id: string) {
     setPreviewLoading(true);
@@ -132,9 +137,9 @@ export function KnowledgePreviewModal({
       );
 
       if (!response.ok) {
-        throw new Error(`预览失败：HTTP ${response.status}`);
+        throw await readApiError(response, '预览失败');
       }
-      setPreview((await response.json()) as ChunkPreview);
+      setPreview(knowledgeChunkPreviewSchema.parse(await response.json()));
     } catch (error) {
       setPreviewError(error instanceof Error ? error.message : '预览失败');
     } finally {
@@ -160,6 +165,7 @@ export function KnowledgePreviewModal({
     setSelectedErrorCode(errorCode);
     setIndexError('');
     setPublishError('');
+    setLifecycleError('');
     setIndexResult(null);
     setDrawerTitle(fileName);
     setDrawerOpen(true);
@@ -181,7 +187,7 @@ export function KnowledgePreviewModal({
         { method: 'POST' },
       );
       if (!response.ok) {
-        throw new Error(`建立索引失败：HTTP ${response.status}`);
+        throw await readApiError(response, '建立索引失败');
       }
 
       const result = (await response.json()) as {
@@ -238,7 +244,7 @@ export function KnowledgePreviewModal({
       );
 
       if (!response.ok) {
-        throw new Error(`发布文档失败：HTTP ${response.status}`);
+        throw await readApiError(response, '发布文档失败');
       }
 
       const result = (await response.json()) as {
@@ -269,6 +275,47 @@ export function KnowledgePreviewModal({
     }
   }
 
+  async function changeDocumentLifecycle(
+    action: 'unpublish' | 'archive' | 'delete',
+  ) {
+    const documentId = selectedDocumentId;
+    if (!documentId || lifecycleAction) return;
+    setLifecycleAction(action);
+    setLifecycleError('');
+    try {
+      const response = await fetch(
+        `/api/knowledge/documents/${encodeURIComponent(documentId)}` +
+          (action === 'delete' ? '' : `/${action}`),
+        { method: action === 'delete' ? 'DELETE' : 'POST' },
+      );
+      if (!response.ok) {
+        throw await readApiError(
+          response,
+          {
+            unpublish: '撤回发布失败',
+            archive: '归档文档失败',
+            delete: '删除文档失败',
+          }[action],
+        );
+      }
+      if (action === 'delete') {
+        setDrawerOpen(false);
+        setSelectedDocumentId(null);
+        setPreview(null);
+      } else {
+        setSelectedPublishStatus(action === 'archive' ? 'ARCHIVED' : 'DRAFT');
+        setCanPublishSelectedDocument(action === 'unpublish');
+      }
+      await refreshDocuments();
+    } catch (error) {
+      setLifecycleError(
+        error instanceof Error ? error.message : '文档操作失败',
+      );
+    } finally {
+      setLifecycleAction(null);
+    }
+  }
+
   async function uploadAndPreview() {
     if (!selectedFile) return;
 
@@ -292,31 +339,27 @@ export function KnowledgePreviewModal({
       }
 
       if (!response.ok) {
-        throw new Error(`上传失败：HTTP ${response.status}`);
+        throw await readApiError(response, '上传失败');
       }
 
-      const uploaded = (await response.json()) as {
-        id?: unknown;
-        status?: unknown;
-        errorCode?: unknown;
-      };
-      if (
-        typeof uploaded.id !== 'string' ||
-        typeof uploaded.status !== 'string'
-      ) {
-        throw new Error('上传响应缺少文档 ID 或处理状态');
-      }
+      const uploaded = knowledgeDocumentSchema.parse(await response.json());
 
       // 上传已写入文档元数据；无论切片成功与否都刷新列表状态。
       void refreshDocuments();
 
       if (uploaded.status === 'FAILED') {
-        setUploadError('文档已上传，但自动切片失败。原文件已保留，可在文档列表中查看状态。');
+        setUploadError(
+          '文档已上传，但自动切片失败。原文件已保留，可在文档列表中查看状态。',
+        );
         return;
       }
 
-      if (uploaded.status === 'CHUNKED') {
-        setUploadError('文档已切片，但索引尚未完成，暂不可用于问答。请在切片抽屉中重试建立索引。');
+      if (uploaded.status === 'UPLOADED' || uploaded.status === 'PARSING') {
+        setUploadError('');
+      } else if (uploaded.status === 'CHUNKED') {
+        setUploadError(
+          '文档已切片，但索引尚未完成，暂不可用于问答。请在切片抽屉中重试建立索引。',
+        );
       } else if (uploaded.status !== 'READY') {
         setUploadError(`文档当前状态为 ${uploaded.status}，暂不可用于问答。`);
       }
@@ -325,11 +368,11 @@ export function KnowledgePreviewModal({
       openChunkDrawer(
         uploaded.id,
         selectedFile.name,
-        uploaded.status as KnowledgeDocumentStatus,
-        'DRAFT',
-        uploaded.status === 'CHUNKED',
-        uploaded.status === 'READY',
-        typeof uploaded.errorCode === 'string' ? uploaded.errorCode : null,
+        uploaded.status,
+        uploaded.publishStatus,
+        uploaded.canRetryIndex,
+        uploaded.canPublish,
+        uploaded.errorCode,
       );
     } catch (error) {
       setUploadError(error instanceof Error ? error.message : '上传失败');
@@ -344,7 +387,7 @@ export function KnowledgePreviewModal({
         title="知识文档"
         open={open}
         onCancel={() => {
-          if (indexing || publishing) return;
+          if (indexing || publishing || lifecycleAction) return;
           setDrawerOpen(false);
           onClose();
         }}
@@ -361,7 +404,9 @@ export function KnowledgePreviewModal({
             <span className="knowledge-preview-step">1</span>
             <div>
               <h3>上传新文档</h3>
-              <p>上传后自动切片并建立草稿索引；确认发布后才会参与知识库问答。</p>
+              <p>
+                上传后自动切片并建立草稿索引；确认发布后才会参与知识库问答。
+              </p>
             </div>
           </div>
           <div className="knowledge-preview-actions">
@@ -480,57 +525,115 @@ export function KnowledgePreviewModal({
         title={drawerTitle || '切片预览'}
         open={open && drawerOpen}
         onClose={() => {
-          if (!indexing && !publishing) setDrawerOpen(false);
+          if (!indexing && !publishing && !lifecycleAction)
+            setDrawerOpen(false);
         }}
-        closable={!indexing && !publishing}
-        maskClosable={!indexing && !publishing}
-        extra={canRetrySelectedIndex ? (
-          <Popconfirm
-            title="重试建立向量索引？"
-            description="切片正文将发送给已配置的外部 Embedding 服务。请先确认文档允许外发。"
-            okText="确认发送"
-            cancelText="取消"
-            zIndex={1200}
-            onConfirm={() => void indexSelectedDocument()}
-          >
-            <Button
-              type="primary"
-              loading={indexing}
-              disabled={
-                !selectedDocumentId ||
-                preview?.documentId !== selectedDocumentId ||
-                !preview.chunkCount
-              }
-            >
-              重试建立索引
-            </Button>
-          </Popconfirm>
-        ) : canPublishSelectedDocument ? (
-          <Popconfirm
-            title="发布当前知识文档？"
-            description="发布后，该文档将立即参与正式知识库问答。"
-            okText="确认发布"
-            cancelText="取消"
-            zIndex={1200}
-            onConfirm={() => void publishSelectedDocument()}
-          >
-            <Button
-              type="primary"
-              loading={publishing}
-              disabled={
-                !selectedDocumentId ||
-                selectedDocumentStatus !== 'READY' ||
-                selectedPublishStatus !== 'DRAFT'
-              }
-            >
-              发布文档
-            </Button>
-          </Popconfirm>
-        ) : null}
+        closable={!indexing && !publishing && !lifecycleAction}
+        maskClosable={!indexing && !publishing && !lifecycleAction}
+        extra={
+          <Space wrap>
+            {canRetrySelectedIndex ? (
+              <Popconfirm
+                title="重试建立向量索引？"
+                description="切片正文将发送给已配置的外部 Embedding 服务。请先确认文档允许外发。"
+                okText="确认发送"
+                cancelText="取消"
+                zIndex={1200}
+                onConfirm={() => void indexSelectedDocument()}
+              >
+                <Button
+                  type="primary"
+                  loading={indexing}
+                  disabled={
+                    !selectedDocumentId ||
+                    preview?.documentId !== selectedDocumentId ||
+                    !preview.chunkCount
+                  }
+                >
+                  重试建立索引
+                </Button>
+              </Popconfirm>
+            ) : canPublishSelectedDocument ? (
+              <Popconfirm
+                title="发布当前知识文档？"
+                description="发布后，该文档将立即参与正式知识库问答。"
+                okText="确认发布"
+                cancelText="取消"
+                zIndex={1200}
+                onConfirm={() => void publishSelectedDocument()}
+              >
+                <Button
+                  type="primary"
+                  loading={publishing}
+                  disabled={
+                    !selectedDocumentId ||
+                    selectedDocumentStatus !== 'READY' ||
+                    selectedPublishStatus !== 'DRAFT'
+                  }
+                >
+                  发布文档
+                </Button>
+              </Popconfirm>
+            ) : null}
+            {selectedPublishStatus === 'PUBLISHED' && (
+              <Popconfirm
+                title="撤回发布？"
+                description="撤回后文档将立即停止参与问答。"
+                onConfirm={() => void changeDocumentLifecycle('unpublish')}
+              >
+                <Button
+                  icon={<RollbackOutlined />}
+                  loading={lifecycleAction === 'unpublish'}
+                >
+                  撤回
+                </Button>
+              </Popconfirm>
+            )}
+            {selectedPublishStatus !== 'ARCHIVED' && (
+              <Popconfirm
+                title="归档文档？"
+                description="归档后不再参与问答，但数据仍会保留。"
+                onConfirm={() => void changeDocumentLifecycle('archive')}
+              >
+                <Button
+                  icon={<InboxOutlined />}
+                  loading={lifecycleAction === 'archive'}
+                >
+                  归档
+                </Button>
+              </Popconfirm>
+            )}
+            {selectedPublishStatus === 'ARCHIVED' && (
+              <Popconfirm
+                title="永久删除文档？"
+                description="原文件、切片和全部向量都会删除，无法恢复。"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => void changeDocumentLifecycle('delete')}
+              >
+                <Button
+                  danger
+                  icon={<DeleteOutlined />}
+                  loading={lifecycleAction === 'delete'}
+                >
+                  删除
+                </Button>
+              </Popconfirm>
+            )}
+          </Space>
+        }
         width="min(760px, 100vw)"
         zIndex={1100}
         className="knowledge-chunk-drawer"
       >
+        {(selectedDocumentStatus === 'UPLOADED' ||
+          selectedDocumentStatus === 'PARSING') && (
+          <Alert
+            className="knowledge-index-feedback"
+            type="info"
+            showIcon
+            message="文档正在后台解析和建立索引，页面会自动刷新状态。"
+          />
+        )}
         {selectedDocumentStatus === 'CHUNKED' && (
           <Alert
             className="knowledge-index-feedback"
@@ -563,6 +666,14 @@ export function KnowledgePreviewModal({
             type="error"
             showIcon
             message={publishError}
+          />
+        )}
+        {lifecycleError && (
+          <Alert
+            className="knowledge-index-feedback"
+            type="error"
+            showIcon
+            message={lifecycleError}
           />
         )}
         {indexError && (

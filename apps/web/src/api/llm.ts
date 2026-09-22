@@ -1,4 +1,4 @@
-import { answerDeltaEventSchema, citationEventSchema, messageCompletedEventSchema, messageFailedEventSchema, MessageStartedEvent, messageStartedEventSchema, streamAnswerRequestSchema, type MessageFailedEvent, type CitationEvent } from "@service-agent/contracts";
+import { answerDeltaEventSchema, citationEventSchema, messageCompletedEventSchema, messageFailedEventSchema, MessageStartedEvent, messageStartedEventSchema, streamAnswerRequestSchema, workflowWaitingApprovalEventSchema, type MessageFailedEvent, type CitationEvent, type WorkflowWaitingApprovalEvent } from "@service-agent/contracts";
 
 type StreamAnswerOptions = {
     onText: (text: string) => void;
@@ -24,6 +24,14 @@ type StreamAnswerOptions = {
     onFailed: (event: MessageFailedEvent) => void;
 
     /**
+     * 退款工作流进入人工审批中断时调用。
+     *
+     * 这是一个终止事件：后端已暂停图执行等待审批，
+     * 本次 SSE 连接不会再产生后续回答。
+     */
+    onWaitingApproval: (event: WorkflowWaitingApprovalEvent) => void;
+
+    /**
    * 收到经过 Schema 校验的知识来源时调用。
    *
    * 当前设为可选回调，因此加入 citation 协议后，
@@ -46,6 +54,7 @@ export function streamAnswer(
     conversationId: string,
     question: string,
     options: StreamAnswerOptions,
+    existingRequestId?: string,
 ): () => void {
     /**
  * 在发起请求前先校验会话编号和用户问题。
@@ -53,7 +62,7 @@ export function streamAnswer(
  * 前后端使用同一个 Schema，
  * 可以保证两边的参数规则保持一致。
  */
-    const requestId = crypto.randomUUID();
+    const requestId = existingRequestId ?? crypto.randomUUID();
     const parseResult = streamAnswerRequestSchema.safeParse({
         conversationId, question, requestId
     })
@@ -475,6 +484,33 @@ export function streamAnswer(
     eventSource.addEventListener('error', () => {
         reportStreamError('连接中断，请稍后重试');
 
+    });
+
+    /**
+     * 监听退款工作流的人工审批中断事件。
+     *
+     * 收到该事件表示退款申请已创建并暂停等待审批，
+     * 本次 SSE 连接到此结束，不会再有 answer.delta。
+     */
+    eventSource.addEventListener('workflow.waiting_approval', (event) => {
+        if (ended) {
+            return;
+        }
+        try {
+            const rawData: unknown = JSON.parse(event.data);
+            const waitingEvent = workflowWaitingApprovalEventSchema.parse(rawData);
+
+            assertCurrentStream(waitingEvent);
+
+            if (!shouldAcceptEvent(waitingEvent.event_id)) {
+                return;
+            }
+            if (finishStream()) {
+                options.onWaitingApproval(waitingEvent);
+            }
+        } catch {
+            reportStreamError('AI 流式事件格式、身份或顺序不正确');
+        }
     });
 
     return () => {

@@ -29,6 +29,12 @@ export function createKnowledgeVectorSearchFilter(
   ].join(' && ');
 }
 
+/**
+ * Scope a filter to one exact index version of one document.
+ *
+ * publish_status is deliberately not part of the filter so that publishing can
+ * re-run over rows a crashed attempt already flipped to PUBLISHED.
+ */
 export function createKnowledgeDocumentVectorFilter(
   tenantId: string,
   knowledgeBaseId: string,
@@ -40,7 +46,26 @@ export function createKnowledgeDocumentVectorFilter(
     `knowledge_base_id == ${JSON.stringify(knowledgeBaseId)}`,
     `document_id == ${JSON.stringify(documentId)}`,
     `index_version == ${JSON.stringify(indexVersion)}`,
-    'publish_status == "DRAFT"',
+  ].join(' && ');
+}
+
+/**
+ * Match every vector of a document except the given index version.
+ *
+ * Used to drop superseded versions after PostgreSQL commits the new one, so a
+ * failed cleanup can never delete the version that is currently authoritative.
+ */
+export function createObsoleteKnowledgeVectorFilter(
+  tenantId: string,
+  knowledgeBaseId: string,
+  documentId: string,
+  currentIndexVersion: string,
+): string {
+  return [
+    `tenant_id == ${JSON.stringify(tenantId)}`,
+    `knowledge_base_id == ${JSON.stringify(knowledgeBaseId)}`,
+    `document_id == ${JSON.stringify(documentId)}`,
+    `index_version != ${JSON.stringify(currentIndexVersion)}`,
   ].join(' && ');
 }
 

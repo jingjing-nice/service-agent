@@ -1,4 +1,19 @@
+import type { Document } from '@langchain/core/documents';
+
 export const KNOWLEDGE_VECTOR_DIMENSION = 1024;
+
+/** LangChain Document 写入知识向量库时必须携带的隔离和版本元数据。 */
+export type KnowledgeVectorDocumentMetadata = {
+  chunkId: string;
+  tenantId: string;
+  knowledgeBaseId: string;
+  documentId: string;
+  chunkIndex: number;
+  indexVersion: string;
+  publishStatus: 'DRAFT';
+};
+
+export type KnowledgeVectorDocument = Document<KnowledgeVectorDocumentMetadata>;
 
 export type KnowledgeVectorRecord = {
   id: string;

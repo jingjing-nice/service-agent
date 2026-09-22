@@ -1,8 +1,14 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
-/** Stable draft version used by the current single-version indexing flow. */
-export function createKnowledgeIndexVersion(documentId: string): string {
-  return `v1-${documentId}`;
+/**
+ * Every rebuild gets an immutable version so stale vectors can be identified.
+ *
+ * Vector primary keys are derived from this version, so a rebuild never
+ * overwrites the previous version in place: the old rows stay readable until
+ * PostgreSQL commits the new version and they are cleaned up explicitly.
+ */
+export function createKnowledgeIndexVersion(_documentId: string): string {
+  return `v2-${randomUUID()}`;
 }
 
 /** Hash stored beside a vector so stale Milvus rows can be rejected. */

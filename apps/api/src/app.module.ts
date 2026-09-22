@@ -7,6 +7,7 @@ import { MessagesModule } from './modules/messages/messages.module.js';
 import { DatabaseModule } from './database/database.module.js';
 import { KnowledgeModule } from './modules/knowledge/knowledge.module.js';
 import { ConversationsModule } from './modules/conversations/conversations.module.js';
+import { RefundModule } from './modules/refunds/refund.module.js';
 
 /**
  * 应用根模块。
@@ -40,7 +41,8 @@ import { ConversationsModule } from './modules/conversations/conversations.modul
     * GET  /api/conversations
     * GET  /api/conversations/:id
     */
-    ConversationsModule
+    ConversationsModule,
+    RefundModule,
   ],
 
   // 注册应用基础接口，例如 /api/health。

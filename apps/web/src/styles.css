@@ -476,6 +476,51 @@ blockquote {
     font-weight: 700
 }
 
+.refund-approval-modal .ant-modal-content {
+    border-radius: 18px
+}
+
+.refund-approval-item {
+    display: block !important;
+    padding-inline: 0 !important
+}
+
+.refund-approval-card {
+    display: grid;
+    gap: 13px;
+    width: 100%;
+    padding: 18px;
+    border: 1px solid #dfe8e4;
+    border-radius: 14px;
+    background: #fbfcfb
+}
+
+.refund-approval-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between
+}
+
+.refund-approval-heading h5 {
+    margin: 0 0 4px !important
+}
+
+.refund-approval-amount strong {
+    margin-left: 8px;
+    color: #17695a;
+    font-size: 20px
+}
+
+.refund-policy-evidence {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 9px;
+    background: #edf5f2;
+    color: #316d62;
+    font-size: 12px
+}
+
 .knowledge-preview-intro {
     margin: 8px 0 22px;
     color: #71817c;

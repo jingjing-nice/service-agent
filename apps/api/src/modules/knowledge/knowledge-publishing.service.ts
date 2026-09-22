@@ -28,7 +28,7 @@ export class KnowledgePublishingService {
         id: normalizedDocumentId,
         tenantId: normalizedTenantId,
         status: 'READY',
-        publishStatus: 'DRAFT',
+        publishStatus: { in: ['DRAFT', 'PUBLISHED'] },
         knowledgeBaseId: { not: null },
         indexVersion: { not: null },
       },
@@ -37,6 +37,8 @@ export class KnowledgePublishingService {
         tenantId: true,
         knowledgeBaseId: true,
         indexVersion: true,
+        publishStatus: true,
+        publishedAt: true,
         updatedAt: true,
         _count: { select: { chunks: true } },
       },
@@ -46,6 +48,27 @@ export class KnowledgePublishingService {
     }
     if (document._count.chunks === 0) {
       throw new ConflictException('Document has no knowledge chunks');
+    }
+
+    /**
+     * 已经发布过的文档直接返回，不重复写向量。
+     *
+     * 重复提交发布请求（例如前端重试或用户重复点击）
+     * 不应该报错，也不应该重新跑一次 Embedding 和 Milvus upsert。
+     * 发布状态以 PostgreSQL 为事实源，indexVersion 已在查询条件中锁定，
+     * 因此这里返回的版本就是当前生效的版本。
+     */
+    if (document.publishStatus === 'PUBLISHED') {
+      return {
+        documentId: document.id,
+        knowledgeBaseId: document.knowledgeBaseId,
+        indexVersion: document.indexVersion,
+        publishStatus: 'PUBLISHED' as const,
+        publishedAt: document.publishedAt?.toISOString(),
+        chunkCount: document._count.chunks,
+        publishedVectorCount: document._count.chunks,
+        idempotent: true,
+      };
     }
 
     const publishedVectorCount = await this.vectorStore.publishDraftVectors(
@@ -73,6 +96,28 @@ export class KnowledgePublishingService {
       data: { publishStatus: 'PUBLISHED', publishedAt, errorCode: null },
     });
     if (updated.count !== 1) {
+      const concurrentResult = await this.prisma.knowledgeDocument.findFirst({
+        where: {
+          id: document.id,
+          tenantId: document.tenantId,
+          status: 'READY',
+          publishStatus: 'PUBLISHED',
+          indexVersion: document.indexVersion,
+        },
+        select: { publishedAt: true },
+      });
+      if (concurrentResult) {
+        return {
+          documentId: document.id,
+          knowledgeBaseId: document.knowledgeBaseId,
+          indexVersion: document.indexVersion,
+          publishStatus: 'PUBLISHED' as const,
+          publishedAt: concurrentResult.publishedAt?.toISOString(),
+          chunkCount: document._count.chunks,
+          publishedVectorCount,
+          idempotent: true,
+        };
+      }
       throw new ConflictException(
         'Document changed during publishing; please retry',
       );
@@ -86,6 +131,8 @@ export class KnowledgePublishingService {
       publishedAt: publishedAt.toISOString(),
       chunkCount: document._count.chunks,
       publishedVectorCount,
+      /** 本次调用真正执行了发布，而不是命中已发布结果。 */
+      idempotent: false,
     };
   }
 }

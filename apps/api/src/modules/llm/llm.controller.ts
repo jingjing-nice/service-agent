@@ -13,6 +13,9 @@ import {
   type MessageCompletedEvent,
   type MessageFailedEvent,
   type MessageStartedEvent,
+  type WorkflowStep,
+  type WorkflowStepCompletedEvent,
+  type WorkflowWaitingApprovalEvent,
 } from '@service-agent/contracts';
 import { randomUUID } from 'node:crypto';
 import { Observable, type Subscriber } from 'rxjs';
@@ -21,6 +24,12 @@ import { LlmService } from './llm.service.js';
 import { KnowledgeService } from '../knowledge/knowledge.service.js';
 import type { CitationEvent } from '@service-agent/contracts';
 import type { FastifyRequest } from 'fastify';
+import { RefundWorkflowService } from '../refunds/refund-workflow.service.js';
+import {
+  RefundWorkflowGraphService,
+  RefundWorkflowInterruptError,
+} from '../refunds/refund-workflow-graph.service.js';
+import { PrismaService } from '../../database/prisma.service.js';
 
 /**
  * 单次模型流允许占用的最长时间。
@@ -36,12 +45,44 @@ type StreamEvent =
   | AnswerDeltaEvent
   | MessageCompletedEvent
   | CitationEvent
-  | MessageFailedEvent;
+  | MessageFailedEvent
+  | WorkflowStepCompletedEvent
+  | WorkflowWaitingApprovalEvent;
 
 type StreamEventMetadata = Pick<
   MessageStartedEvent,
   'event_id' | 'request_id' | 'trace_id' | 'message_id'
 >;
+
+export type AnswerCitation = {
+  index: number;
+  title: string;
+  source: string;
+  chunkId: string;
+};
+
+/** Only references to supplied chunks are allowed to become public citations. */
+export function extractVerifiedCitations(
+  answer: string,
+  sources: Array<{
+    title: string;
+    documentId: string;
+    chunkId: string;
+  }>,
+): AnswerCitation[] {
+  const indexes = new Set(
+    [...answer.matchAll(/\[(\d+)\]/g)]
+      .map((match) => Number(match[1]))
+      .filter((index) => index >= 1 && index <= sources.length),
+  );
+
+  return [...indexes].map((index) => ({
+    index,
+    title: sources[index - 1].title,
+    source: sources[index - 1].documentId,
+    chunkId: sources[index - 1].chunkId,
+  }));
+}
 
 /**
  * 把业务事件转换成 NestJS 所需的 SSE 消息格式。
@@ -61,6 +102,9 @@ export class LlmController {
     private readonly llmService: LlmService,
     private readonly messagesService: MessagesService,
     private readonly knowledgeService: KnowledgeService,
+    private readonly refundWorkflow: RefundWorkflowService,
+    private readonly refundGraph: RefundWorkflowGraphService,
+    private readonly prisma: PrismaService,
   ) { }
 
   /**
@@ -208,59 +252,53 @@ export class LlmController {
           });
 
           /**
-           * 当前 RAG 流程必须指定知识库。
+           * 退款属于高风险写操作，使用 LangGraph 确定性工作流而不是让模型自行调用。
            *
-           * DEFAULT_KNOWLEDGE_BASE_ID 由服务端环境配置提供，
-           * 不能允许浏览器自行指定任意知识库。
+           * isRefundIntent 仅当用户同时提到退款关键词和订单号时才返回 true，
+           * 工作流内部会自主完成 RAG 检索、订单查询、资格校验、申请创建和审批中断。
+           *
+           * 纯政策咨询（如“退款政策是啥”）不包含订单号，走下面普通 LLM 流式回答，
+           * 由模型基于 RAG 检索到的知识生成完整政策说明。
            */
-          if (!knowledgeBaseId) {
-            throw new Error(
-              'DEFAULT_KNOWLEDGE_BASE_ID is required',
+          if (this.refundWorkflow.isRefundIntent(question)) {
+            await this.handleRefundWorkflow(
+              subscriber,
+              createEventMetadata,
+              { tenantId, conversationId, question, requestId, traceId },
+              { cancelled, timeoutId, abortController },
             );
+            return;
           }
 
           /**
-    * 从当前租户的默认知识库检索已发布知识。
-    *
-    * 正式聊天不能使用 DRAFT 文档。
-    *
-    * KnowledgeRagService 会执行两层过滤：
-    *
-    * 第一层是 Milvus：
-    * 1. tenantId 必须匹配；
-    * 2. knowledgeBaseId 必须匹配；
-    * 3. publish_status 必须为 PUBLISHED。
-    *
-    * 第二层是 PostgreSQL：
-    * 1. 文档技术状态必须为 READY；
-    * 2. 文档业务状态必须为 PUBLISHED；
-    * 3. 文档索引版本必须与向量版本一致；
-    * 4. 切片正文哈希必须一致。
-    *
-    * 没有已发布知识时返回空数组，
-    * LlmService 应根据空来源执行明确拒答。
-    */
+           * 当前 RAG 流程必须指定知识库。
+           */
+          if (!knowledgeBaseId) {
+            throw new Error('DEFAULT_KNOWLEDGE_BASE_ID is required');
+          }
+
+          /**
+           * 从当前租户的默认知识库检索已发布知识。
+           *
+           * 正式聊天不能使用 DRAFT 文档。
+           */
           const sources =
             await this.knowledgeService.retrievePublishedKnowledge(
               tenantId,
               knowledgeBaseId,
               question,
             );
+
           /**
            * 调用大模型并逐段读取流式回答。
-           *
-           * 参数说明：
-           * question：本轮客户问题；
-           * history：数据库中读取的最近历史消息；
-           * sources：知识库检索结果；
-           * signal：客户端断开或超时时终止模型请求。
            */
-          for await (const text of this.llmService.streamAnswer(
+          const answerStream = this.llmService.streamAnswer(
             question,
             history,
             sources,
             abortController.signal,
-          )) {
+          );
+          for await (const text of answerStream) {
             /**
              * 客户端断开连接后，不再继续发送 SSE 事件。
              *
@@ -315,45 +353,7 @@ export class LlmController {
            *
            * 正则会提取编号 1。
            */
-          const citedIndexes = new Set(
-            [...fullAnswer.matchAll(/\[(\d+)\]/g)]
-              .map((match) => Number(match[1]))
-
-              /**
-               * 只保留知识检索结果范围内的编号。
-               *
-               * 如果模型生成了不存在的 [99]，
-               * 该编号不会被转换为公开引用。
-               */
-              .filter(
-                (index) =>
-                  index >= 1 &&
-                  index <= sources.length,
-              ),
-          );
-
-          /**
-           * 将回答中的引用编号转换为结构化引用。
-           *
-           * 前端使用这些数据展示来源卡片，
-           * 不需要重新解析回答正文。
-           */
-          const citations = [...citedIndexes].map((index) => {
-            /**
-             * 引用编号从 1 开始，
-             * sources 数组下标从 0 开始，因此需要减 1。
-             */
-            const source = sources[index - 1];
-
-            return {
-              index,
-              title: source.title,
-              /** 文档 ID 用于标识引用所属知识文档。 */
-              source: source.documentId,
-              /** 精确记录模型实际引用的检索切片。 */
-              chunkId: source.chunkId,
-            };
-          });
+          const citations = extractVerifiedCitations(fullAnswer, sources);
 
           /**
            * 将完整 AI 回答和引用保存到 PostgreSQL。
@@ -386,7 +386,7 @@ export class LlmController {
              * 都可以使用该字段。
              */
             modelName:
-              process.env.OPENAI_MODEL ?? 'unknown',
+              process.env.LLM_MODEL ?? 'unknown',
           });
 
           /**
@@ -418,9 +418,12 @@ export class LlmController {
            * 清除超时定时器并释放 AbortController。
            */
           subscriber.complete();
-        } catch {
+        } catch (error) {
           // complete/unsubscribe 会触发 teardown；取消造成的异常不应再生成失败事件。
           if (cancelled || abortController.signal.aborted) return;
+
+          // 打印真实异常便于排查，客户端仍只看到稳定的公开错误信息。
+          console.error('[llm-stream] workflow/model failed:', error);
 
           failStream('MODEL_STREAM_FAILED', 'AI 服务暂时不可用，请稍后重试');
         }
@@ -432,5 +435,151 @@ export class LlmController {
         abortController.abort();
       };
     });
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 退款工作流 LangGraph 处理
+  // ══════════════════════════════════════════════════════════════════
+
+  /** 工作流步骤 → 前端展示标签映射。 */
+  private static readonly STEP_LABELS: Record<string, string> = {
+    rag_retrieve: '检索退款政策',
+    extract_order: '提取订单号',
+    query_order: '查询订单信息',
+    check_eligibility: '判断退款资格',
+    create_refund: '创建退款申请',
+    await_approval: '等待人工审批',
+    build_result: '生成处理结果',
+  };
+
+  /**
+   * 启动 LangGraph 退款工作流，将每个节点的执行结果以 SSE 事件推送给前端。
+   *
+   * - 图正常完成（无政策/无订单/不符合条件）：发送 message.completed 关闭流
+   * - 图中断（需审批）：发送 workflow.waiting_approval 关闭流
+   * - 审批后通过 RefundController.decide 恢复执行并持久化结果
+   */
+  private async handleRefundWorkflow(
+    subscriber: Subscriber<MessageEvent>,
+    createEventMetadata: () => StreamEventMetadata,
+    params: {
+      tenantId: string;
+      conversationId: string;
+      question: string;
+      requestId: string;
+      traceId: string;
+    },
+    cleanup: {
+      cancelled: boolean;
+      timeoutId: ReturnType<typeof setTimeout>;
+      abortController: AbortController;
+    },
+  ): Promise<void> {
+    // 查询会话获取 customerId
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id: params.conversationId, tenantId: params.tenantId },
+      select: { customerId: true },
+    });
+
+    if (!conversation) {
+      // 会话不存在，走通用失败处理
+      throw new Error('CONVERSATION_NOT_FOUND');
+    }
+
+    try {
+      for await (const update of this.refundGraph.streamWorkflow(
+        {
+          tenantId: params.tenantId,
+          conversationId: params.conversationId,
+          question: params.question,
+          requestId: params.requestId,
+          traceId: params.traceId,
+          customerId: conversation.customerId,
+        },
+        params.conversationId,
+      )) {
+        if (cleanup.cancelled) return;
+
+        const label =
+          LlmController.STEP_LABELS[update.node] ?? update.node;
+
+        emitEvent(subscriber, {
+          type: 'workflow.step_completed',
+          ...createEventMetadata(),
+          step: update.node as WorkflowStep,
+          label,
+        });
+
+        /**
+         * build_result 节点产出最终答案时，需要将 finalAnswer
+         * 以 answer.delta 事件发送给前端，否则前端无法累积
+         * streamingText，导致 saveAssistantMessage 不会保存本地消息。
+         *
+         * 同时发送 citation 事件，保持与普通 LLM 流一致的协议。
+         */
+        if (update.node === 'build_result' && update.data.finalAnswer) {
+          emitEvent(subscriber, {
+            type: 'answer.delta',
+            ...createEventMetadata(),
+            text: update.data.finalAnswer,
+          });
+
+          const citations: Array<{
+            index: number;
+            title: string;
+            source: string;
+            chunkId?: string;
+          }> = Array.isArray(update.data.citations)
+            ? (update.data.citations as Array<{
+                index: number;
+                title: string;
+                source: string;
+                chunkId?: string;
+              }>)
+            : [];
+
+          for (const citation of citations) {
+            emitEvent(subscriber, {
+              type: 'citation',
+              ...createEventMetadata(),
+              index: citation.index,
+              title: citation.title,
+              source: citation.source,
+              ...(citation.chunkId ? { chunkId: citation.chunkId } : {}),
+            });
+          }
+        }
+      }
+
+      // 图正常完成（无政策 / 无订单 / 不符合条件等提前返回路径）
+      // 结果已由 buildResultNode 持久化到消息表
+      if (!cleanup.cancelled) {
+        emitEvent(subscriber, {
+          type: 'message.completed',
+          ...createEventMetadata(),
+        });
+        subscriber.complete();
+        clearTimeout(cleanup.timeoutId);
+      }
+    } catch (error: unknown) {
+      if (cleanup.cancelled || cleanup.abortController.signal.aborted) return;
+
+      if (error instanceof RefundWorkflowInterruptError) {
+        // 审批中断：发送 waiting_approval 事件，客户端进入等待审批状态
+        emitEvent(subscriber, {
+          type: 'workflow.waiting_approval',
+          ...createEventMetadata(),
+          refundRequestId: error.interruptContext.refundRequestId,
+          orderNo: error.interruptContext.orderNo,
+          amount: error.interruptContext.amount,
+          reason: error.interruptContext.reason,
+        });
+        subscriber.complete();
+        clearTimeout(cleanup.timeoutId);
+        return;
+      }
+
+      throw error;
+    }
   }
 }

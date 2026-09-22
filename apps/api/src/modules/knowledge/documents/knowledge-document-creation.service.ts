@@ -5,11 +5,10 @@ import {
   type KnowledgeDocument,
 } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../../database/prisma.service.js';
-import { KnowledgeChunkService } from './knowledge-chunk.service.js';
 import { mapCreatedKnowledgeDocument } from './knowledge-document.mapper.js';
 import type { ValidatedKnowledgeFile } from '../knowledge-file.validator.js';
-import { KnowledgeIndexingService } from '../indexing/knowledge-indexing.service.js';
 import { KnowledgeObjectStorageService } from '../knowledge-object-storage.service.js';
+import { KnowledgeProcessingQueueService } from '../jobs/knowledge-processing-queue.service.js';
 
 @Injectable()
 export class KnowledgeDocumentCreationService {
@@ -18,8 +17,7 @@ export class KnowledgeDocumentCreationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly objectStorage: KnowledgeObjectStorageService,
-    private readonly chunkService: KnowledgeChunkService,
-    private readonly indexingService: KnowledgeIndexingService,
+    private readonly processingQueue: KnowledgeProcessingQueueService,
   ) {}
 
   async createDocument(tenantId: string, file: ValidatedKnowledgeFile) {
@@ -81,66 +79,19 @@ export class KnowledgeDocumentCreationService {
       throw error;
     }
 
-    let chunkCount: number | undefined;
-    if (file.fileType === 'MARKDOWN') {
-      const result = await this.tryChunkDocument(normalizedTenantId, document);
-      document = result.document;
-      chunkCount = result.chunkCount;
-    }
-    if (document.status === 'CHUNKED') {
-      document = await this.tryIndexDocument(normalizedTenantId, document);
-    }
-
-    return mapCreatedKnowledgeDocument(document, chunkCount);
-  }
-
-  private async tryChunkDocument(
-    tenantId: string,
-    document: KnowledgeDocument,
-  ) {
     try {
+      await this.processingQueue.enqueue(normalizedTenantId, document.id);
+    } catch (error) {
+      this.logProcessingError('enqueue', document.id, error);
       await this.prisma.knowledgeDocument.update({
         where: { id: document.id },
-        data: { status: 'PARSING', errorCode: null },
-      });
-      const saved = await this.chunkService.saveMarkdownChunks(
-        tenantId,
-        document.id,
-      );
-      return {
-        document: await this.prisma.knowledgeDocument.findUniqueOrThrow({
-          where: { id: document.id },
-        }),
-        chunkCount: saved.chunkCount,
-      };
-    } catch (error) {
-      this.logProcessingError('chunk', document.id, error);
-      return {
-        document: await this.prisma.knowledgeDocument.update({
-          where: { id: document.id },
-          data: { status: 'FAILED', errorCode: 'KNOWLEDGE_CHUNKING_FAILED' },
-        }),
-        chunkCount: undefined,
-      };
-    }
-  }
-
-  private async tryIndexDocument(
-    tenantId: string,
-    document: KnowledgeDocument,
-  ) {
-    try {
-      await this.indexingService.indexDocumentDraft(tenantId, document.id);
-    } catch (error) {
-      this.logProcessingError('index', document.id, error);
-      await this.prisma.knowledgeDocument.updateMany({
-        where: { id: document.id, tenantId, status: 'CHUNKED' },
-        data: { errorCode: 'KNOWLEDGE_INDEXING_FAILED' },
+        data: { status: 'FAILED', errorCode: 'KNOWLEDGE_QUEUE_FAILED' },
       });
     }
-    return this.prisma.knowledgeDocument.findUniqueOrThrow({
+    document = await this.prisma.knowledgeDocument.findUniqueOrThrow({
       where: { id: document.id },
     });
+    return mapCreatedKnowledgeDocument(document);
   }
 
   private async deleteOrphanObject(objectName: string) {
@@ -163,7 +114,7 @@ export class KnowledgeDocumentCreationService {
   }
 
   private logProcessingError(
-    operation: 'chunk' | 'index',
+    operation: 'enqueue',
     documentId: string,
     error: unknown,
   ) {
